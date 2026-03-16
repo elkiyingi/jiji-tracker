@@ -1,26 +1,41 @@
 """
-Jiji.ug Deal Scraper — v4 DEBUG
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-This version adds full HTML debugging:
-  - Saves the raw HTML of every search page to /tmp/debug_*.html
-  - Logs the first 3000 chars of HTML so we can see in Actions logs
-    what Jiji is actually returning to the headless browser
-  - Tries multiple anti-bot evasion techniques
-  - Falls back to requests-html / httpx if Playwright gets a bot wall
+Jiji.ug Deal Scraper — v6
+━━━━━━━━━━━━━━━━━━━━━━━━━
+CLOUDFLARE BYPASS: FlareSolverr
+  FlareSolverr runs as a local Docker service inside GitHub Actions.
+  It spins up a real Chrome browser with undetected-chromedriver,
+  solves Cloudflare challenges, and returns the rendered HTML via
+  a simple HTTP API on localhost:8191.
 
-The debug HTML files are uploaded as GitHub Actions artifacts so you
-can download and inspect them.
+  No API keys. No costs. Completely free and open source.
+  https://github.com/FlareSolverr/FlareSolverr
+
+HOW IT WORKS:
+  We POST to http://localhost:8191/v1 with:
+    { "cmd": "request.get", "url": "https://jiji.ug/cars?query=...", "maxTimeout": 60000 }
+  FlareSolverr returns:
+    { "solution": { "response": "<html>...</html>", "status": 200 } }
+
+Required env vars:
+  SUPABASE_URL       — Supabase project URL
+  SUPABASE_KEY       — Supabase service_role key
+  TELEGRAM_TOKEN     — Telegram bot token  (optional)
+  TELEGRAM_CHAT_ID   — Telegram chat/channel ID  (optional)
+
+FlareSolverr is started automatically by the GitHub Actions workflow
+as a service container — no setup needed beyond the workflow file.
 """
 
-import asyncio
 import os
 import re
+import json
+import time
 import logging
+import urllib.request
+import urllib.parse
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Optional
 
-from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 from bs4 import BeautifulSoup
 from supabase import create_client, Client
 
@@ -31,20 +46,18 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-DEBUG_DIR = Path("/tmp/jiji_debug")
-DEBUG_DIR.mkdir(exist_ok=True)
-
 # ── Config ────────────────────────────────────────────────────────────────────
 SUPABASE_URL: str     = os.environ["SUPABASE_URL"]
 SUPABASE_KEY: str     = os.environ["SUPABASE_KEY"]
 TELEGRAM_TOKEN: str   = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID: str = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-MAX_SELLER_ADS  = 3
-MAX_PAGES       = 3
-PAGE_TIMEOUT    = 60_000   # increased to 60s
-DETAIL_TIMEOUT  = 30_000
-CONCURRENCY     = 2
+FLARESOLVERR_URL = os.environ.get("FLARESOLVERR_URL", "http://localhost:8191/v1")
+MAX_TIMEOUT      = 60_000   # ms — passed to FlareSolverr per request
+MAX_SELLER_ADS   = 3
+MAX_PAGES        = 3
+RETRY_ATTEMPTS   = 2
+DELAY_BETWEEN    = 3        # seconds between requests
 
 SEARCH_QUERIES = [
     {
@@ -150,190 +163,138 @@ def parse_market_range(text: str) -> tuple[Optional[int], Optional[int]]:
     return _extract(parts[0]), _extract(parts[1])
 
 
-# ── Debug helper ──────────────────────────────────────────────────────────────
-def save_debug_html(slug: str, html: str) -> None:
-    """Save HTML to file for artifact upload, and log a preview."""
-    safe_slug = re.sub(r"[^\w-]", "_", slug)[:60]
-    path = DEBUG_DIR / f"debug_{safe_slug}.html"
-    path.write_text(html, encoding="utf-8")
-    log.info("DEBUG HTML saved → %s (%d bytes)", path, len(html))
+# ── FlareSolverr fetch ────────────────────────────────────────────────────────
+def flare_get(target_url: str) -> Optional[str]:
+    """
+    Ask FlareSolverr to fetch target_url through a real Chrome browser.
+    Returns the rendered HTML string, or None on failure.
+    """
+    payload = json.dumps({
+        "cmd":        "request.get",
+        "url":        target_url,
+        "maxTimeout": MAX_TIMEOUT,
+    }).encode()
 
-    # Log the first 2000 chars so it's visible directly in Actions log
-    preview = html[:2000].replace("\n", " ").replace("\r", "")
-    log.info("HTML PREVIEW (first 2000 chars): %s", preview)
-
-    # Also log key signals
-    signals = {
-        "has 'advert'":      "advert"      in html.lower(),
-        "has 'b-list'":      "b-list"      in html.lower(),
-        "has 'price'":       "price"       in html.lower(),
-        "has 'harrier'":     "harrier"     in html.lower(),
-        "has 'vanguard'":    "vanguard"    in html.lower(),
-        "has 'captcha'":     "captcha"     in html.lower(),
-        "has 'cloudflare'":  "cloudflare"  in html.lower(),
-        "has 'robot'":       "robot"       in html.lower(),
-        "has 'blocked'":     "blocked"     in html.lower(),
-        "page title":        re.search(r"<title>(.*?)</title>", html, re.I),
-    }
-    for k, v in signals.items():
-        if k == "page title":
-            log.info("  SIGNAL %s: %s", k, v.group(1) if v else "NOT FOUND")
-        else:
-            log.info("  SIGNAL %s: %s", k, v)
-
-
-# ── Playwright browser context with anti-bot settings ────────────────────────
-async def make_context(browser):
-    """Create a browser context that looks as human as possible."""
-    context = await browser.new_context(
-        user_agent=(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/122.0.0.0 Safari/537.36"
-        ),
-        viewport={"width": 1366, "height": 768},
-        locale="en-US",
-        timezone_id="Africa/Kampala",
-        # Pretend to be a real browser with these headers
-        extra_http_headers={
-            "Accept-Language":  "en-US,en;q=0.9",
-            "Accept":           "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "Accept-Encoding":  "gzip, deflate, br",
-            "DNT":              "1",
-            "Upgrade-Insecure-Requests": "1",
-        },
-    )
-    # Override navigator.webdriver to avoid detection
-    await context.add_init_script("""
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
-        Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-        window.chrome = { runtime: {} };
-    """)
-    return context
-
-
-# ── Page loader ───────────────────────────────────────────────────────────────
-async def load_page(page, url: str, timeout: int, slug: str = "") -> Optional[str]:
-    """Load page, wait for content, save debug HTML, return HTML string."""
-    log.info("Loading: %s", url)
-    try:
-        response = await page.goto(
-            url,
-            wait_until="networkidle",   # wait for ALL network requests to finish
-            timeout=timeout,
-        )
-        if response:
-            log.info("  HTTP %d for %s", response.status, url)
-    except PlaywrightTimeout:
-        log.warning("  networkidle timeout — trying domcontentloaded fallback")
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
-        except PlaywrightTimeout:
-            log.warning("  domcontentloaded also timed out: %s", url)
-            html = await page.content()
-            if slug:
-                save_debug_html(f"timeout_{slug}", html)
-            return None
+            req = urllib.request.Request(
+                FLARESOLVERR_URL,
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=MAX_TIMEOUT // 1000 + 10) as resp:
+                data = json.loads(resp.read())
+
+            status  = data.get("status", "")
+            solution = data.get("solution", {})
+            html    = solution.get("response", "")
+            http_status = solution.get("status", 0)
+
+            log.info(
+                "  FlareSolverr status=%s HTTP=%s bytes=%d",
+                status, http_status, len(html),
+            )
+
+            if status != "ok":
+                log.warning("  FlareSolverr returned status=%s: %s", status, data.get("message", ""))
+                if attempt < RETRY_ATTEMPTS:
+                    time.sleep(5)
+                continue
+
+            # Check we actually got past Cloudflare
+            if "Just a moment" in html or "Performing security verification" in html:
+                log.warning(
+                    "  Still got Cloudflare challenge page (attempt %d/%d)",
+                    attempt, RETRY_ATTEMPTS,
+                )
+                if attempt < RETRY_ATTEMPTS:
+                    time.sleep(8)
+                continue
+
+            return html
+
         except Exception as exc:
-            log.error("  Navigation failed: %s", exc)
-            return None
-    except Exception as exc:
-        log.error("  Navigation error: %s", exc)
-        return None
+            log.error("  FlareSolverr request error (attempt %d): %s", attempt, exc)
+            if attempt < RETRY_ATTEMPTS:
+                time.sleep(5)
 
-    # Extra wait for JS-rendered content
-    await asyncio.sleep(3)
+    return None
 
-    # Scroll to bottom (triggers lazy loading)
-    try:
-        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        await asyncio.sleep(1)
-        await page.evaluate("window.scrollTo(0, 0)")
-        await asyncio.sleep(0.5)
-    except Exception:
-        pass
 
-    html = await page.content()
-
-    if slug:
-        save_debug_html(slug, html)
-
-    return html
+def wait_for_flaresolverr(max_wait: int = 30) -> bool:
+    """Poll FlareSolverr health endpoint until it's ready."""
+    log.info("Waiting for FlareSolverr to be ready...")
+    health_url = FLARESOLVERR_URL.replace("/v1", "/health")
+    # fallback: just hit /v1 with a dummy payload
+    for i in range(max_wait):
+        try:
+            req = urllib.request.Request(
+                health_url,
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                body = json.loads(resp.read())
+                if body.get("status") == "ok" or resp.status == 200:
+                    log.info("FlareSolverr ready after %ds", i)
+                    return True
+        except Exception:
+            pass
+        time.sleep(1)
+    log.error("FlareSolverr did not become ready within %ds", max_wait)
+    return False
 
 
 # ── Search-page parser ────────────────────────────────────────────────────────
-def parse_search_html(html: str, category: str, query: str) -> list[Ad]:
+def parse_search_html(html: str, category: str, query: str) -> list["Ad"]:
     soup = BeautifulSoup(html, "lxml")
     ads:  list[Ad] = []
 
-    # Log all CSS classes containing 'advert' or 'list' to help identify selectors
-    class_samples = set()
-    for tag in soup.find_all(class_=True):
-        for cls in tag.get("class", []):
-            if any(kw in cls.lower() for kw in ("advert", "list", "item", "card", "product")):
-                class_samples.add(cls)
-    if class_samples:
-        log.info("  Relevant CSS classes found: %s", sorted(class_samples)[:30])
+    page_title = soup.title.string if soup.title else "none"
+    log.info(
+        "  Page title='%s' | size=%d | has_advert=%s",
+        page_title, len(html), "advert" in html.lower(),
+    )
 
-    # Try progressively broader selectors
-    selector_attempts = [
-        "article.b-list-advert__item",
-        "div.b-list-advert__item",
-        "li.b-list-advert__item",
-        "article[class*='advert']",
-        "div[class*='advert-item']",
-        "div[class*='list-item']",
-        # Very broad — any article or li with a price-like child
-        "article",
-        "li",
-    ]
+    # Primary selectors
+    cards = (
+        soup.select("article.b-list-advert__item")
+        or soup.select("div.b-list-advert__item")
+        or soup.select("li.b-list-advert__item")
+        or soup.select("article[class*='advert']")
+        or soup.select("div[class*='advert-item']")
+    )
 
-    cards = []
-    for sel in selector_attempts:
-        found = soup.select(sel)
-        if found:
-            log.info("  Selector '%s' matched %d elements", sel, len(found))
-            # Only use broad selectors if they contain price-like text
-            if sel in ("article", "li"):
-                found = [
-                    c for c in found
-                    if re.search(r"ush|ugx|\d{7,}", c.get_text().lower())
-                ]
-                log.info("    → %d have price-like text", len(found))
-            if found:
-                cards = found
-                break
+    if cards:
+        log.info("  Found %d card elements", len(cards))
+        for card in cards:
+            ad = _parse_card(card, category, query)
+            if ad:
+                ads.append(ad)
+        return ads
 
-    for card in cards:
-        ad = _parse_card(card, category, query)
-        if ad:
-            ads.append(ad)
+    # Fallback: scan all anchors for listing URLs
+    log.info("  No card elements — trying link scan")
+    seen: set[str] = set()
+    for a in soup.find_all("a", href=True):
+        href: str = a["href"]
+        if not re.search(
+            r"/(cars|land|vehicles|property|land-plots)/[\w-]+-\w{10,}", href
+        ):
+            continue
+        full_url = href if href.startswith("http") else f"https://jiji.ug{href}"
+        if full_url in seen:
+            continue
+        seen.add(full_url)
+        title = a.get_text(strip=True)[:200] or "Untitled"
+        ads.append(Ad(
+            title=title, price=None, location="Uganda",
+            image_url="", ad_url=full_url,
+            category=category, query=query,
+        ))
 
-    # Fallback: direct link scan
-    if not ads:
-        log.info("  No cards parsed — trying link scan")
-        seen: set[str] = set()
-        for a in soup.find_all("a", href=True):
-            href: str = a["href"]
-            # Jiji listing pages have URLs like /uganda/cars/NAME-ID or
-            # /kampala/cars/NAME-ID — the ID is ~20 alphanumeric chars
-            if not re.search(r"\.ug/([\w-]+/){1,3}[\w-]+-\w{15,}", "https://jiji" + href):
-                if not re.search(r"/(cars|land|vehicles|property)/[\w-]+-\w{10,}", href):
-                    continue
-            full_url = href if href.startswith("http") else f"https://jiji.ug{href}"
-            if full_url in seen:
-                continue
-            seen.add(full_url)
-            title = a.get_text(strip=True)[:200] or "Untitled"
-            ads.append(Ad(
-                title=title, price=None, location="Uganda",
-                image_url="", ad_url=full_url,
-                category=category, query=query,
-            ))
-        if ads:
-            log.info("  Link-scan found %d stubs", len(ads))
-
+    if ads:
+        log.info("  Link-scan found %d stubs", len(ads))
     return ads
 
 
@@ -392,92 +353,102 @@ def _parse_card(card, category: str, query: str) -> Optional[Ad]:
 
 
 # ── Detail-page enrichment ────────────────────────────────────────────────────
-async def enrich_ad(context, ad: Ad) -> Optional[Ad]:
-    page = await context.new_page()
-    try:
-        html = await load_page(page, ad.ad_url, DETAIL_TIMEOUT)
-        if not html:
-            return None
-
-        soup = BeautifulSoup(html, "lxml")
-
-        count = _extract_seller_count(soup)
-        ad.seller_ad_count = count
-        if count > MAX_SELLER_ADS:
-            log.info("  SKIP broker (%d ads): %.60s", count, ad.title)
-            return None
-
-        name_el = (
-            soup.select_one("div.b-seller-block__name")
-            or soup.select_one("span.b-advert-contact__name")
-            or soup.select_one("div.b-user-info__name")
-            or soup.select_one("[class*='seller'] [class*='name']")
-        )
-        ad.seller_name = name_el.get_text(strip=True) if name_el else ""
-
-        if not ad.price:
-            price_el = (
-                soup.select_one("span.b-advert-price__converted")
-                or soup.select_one("div.b-advert-price")
-                or soup.select_one("[class*='price']")
-            )
-            if price_el:
-                ad.price = parse_ugx(price_el.get_text(strip=True))
-
-        # Market price range
-        market_text = None
-        market_el = (
-            soup.select_one("div.b-advert-price__market")
-            or soup.select_one("span.b-advert-price__market")
-            or soup.select_one("[class*='market-price']")
-        )
-        if market_el:
-            market_text = market_el.get_text(" ", strip=True)
-
-        if not market_text:
-            for tag in soup.find_all(string=re.compile(r"[Mm]arket\s*price", re.I)):
-                parent_text = tag.parent.get_text(" ", strip=True) if tag.parent else ""
-                if any(sep in parent_text for sep in ("~", "–", "—")):
-                    market_text = parent_text
-                    break
-                if tag.parent and tag.parent.parent:
-                    sib = tag.parent.parent.get_text(" ", strip=True)
-                    if "~" in sib:
-                        market_text = sib
-                        break
-
-        if market_text:
-            ad.market_price_low, ad.market_price_high = parse_market_range(market_text)
-
-        if not ad.image_url:
-            og = soup.find("meta", property="og:image")
-            if og:
-                ad.image_url = og.get("content", "")
-
-        if not ad.location or ad.location == "Uganda":
-            loc_el = (
-                soup.select_one("span.b-advert-details__item--region")
-                or soup.select_one("[class*='location']")
-            )
-            if loc_el:
-                ad.location = loc_el.get_text(strip=True)
-
-        ad.evaluate_deal()
-        return ad
-
-    except Exception as exc:
-        log.error("Enrich error for %s: %s", ad.ad_url, exc)
+def enrich_ad(ad: Ad) -> Optional[Ad]:
+    log.info("  Enriching: %.60s", ad.title)
+    html = flare_get(ad.ad_url)
+    if not html:
         return None
-    finally:
-        await page.close()
+
+    soup = BeautifulSoup(html, "lxml")
+
+    # Seller count
+    count = _extract_seller_count(soup)
+    ad.seller_ad_count = count
+    if count > MAX_SELLER_ADS:
+        log.info("  SKIP broker (%d ads): %.60s", count, ad.title)
+        return None
+
+    # Seller name
+    name_el = (
+        soup.select_one("div.b-seller-block__name")
+        or soup.select_one("span.b-advert-contact__name")
+        or soup.select_one("div.b-user-info__name")
+        or soup.select_one("[class*='seller'] [class*='name']")
+    )
+    ad.seller_name = name_el.get_text(strip=True) if name_el else ""
+
+    # Price (detail page is more reliable)
+    if not ad.price:
+        price_el = (
+            soup.select_one("span.b-advert-price__converted")
+            or soup.select_one("div.b-advert-price")
+            or soup.select_one("[class*='price']")
+        )
+        if price_el:
+            ad.price = parse_ugx(price_el.get_text(strip=True))
+
+    # Market price range
+    market_text = None
+    market_el = (
+        soup.select_one("div.b-advert-price__market")
+        or soup.select_one("span.b-advert-price__market")
+        or soup.select_one("[class*='market-price']")
+    )
+    if market_el:
+        market_text = market_el.get_text(" ", strip=True)
+
+    if not market_text:
+        for tag in soup.find_all(string=re.compile(r"[Mm]arket\s*price", re.I)):
+            parent_text = tag.parent.get_text(" ", strip=True) if tag.parent else ""
+            if any(sep in parent_text for sep in ("~", "–", "—")):
+                market_text = parent_text
+                break
+            if tag.parent and tag.parent.parent:
+                sib = tag.parent.parent.get_text(" ", strip=True)
+                if "~" in sib:
+                    market_text = sib
+                    break
+
+    if market_text:
+        ad.market_price_low, ad.market_price_high = parse_market_range(market_text)
+        if ad.market_price_low:
+            log.info(
+                "  Market: USh %s ~ %s",
+                f"{ad.market_price_low:,}",
+                f"{ad.market_price_high:,}" if ad.market_price_high else "?",
+            )
+
+    # Better image
+    if not ad.image_url:
+        og = soup.find("meta", property="og:image")
+        if og:
+            ad.image_url = og.get("content", "")
+
+    # Better location
+    if not ad.location or ad.location == "Uganda":
+        loc_el = (
+            soup.select_one("span.b-advert-details__item--region")
+            or soup.select_one("[class*='location']")
+        )
+        if loc_el:
+            ad.location = loc_el.get_text(strip=True)
+
+    ad.evaluate_deal()
+    return ad
 
 
 def _extract_seller_count(soup: BeautifulSoup) -> int:
     for a in soup.select("a"):
-        m = re.search(r"(?:all\s+ads?|see\s+all)\s*\((\d+)\)", a.get_text(strip=True), re.I)
+        m = re.search(
+            r"(?:all\s+ads?|see\s+all)\s*\((\d+)\)",
+            a.get_text(strip=True), re.I,
+        )
         if m:
             return int(m.group(1))
-    for sel in ("div.b-seller-block", "div.b-user-info", "div.b-advert-contact", "div.seller-info"):
+    for sel in (
+        "div.b-seller-block", "div.b-user-info",
+        "div.b-advert-contact", "div.seller-info",
+    ):
         for el in soup.select(sel):
             m = re.search(r"(\d+)\s+[Aa]ds?", el.get_text(" ", strip=True))
             if m:
@@ -492,18 +463,6 @@ def _extract_seller_count(soup: BeautifulSoup) -> int:
     if m:
         return int(m.group(1))
     return 1
-
-
-# ── Batch enrichment ─────────────────────────────────────────────────────────
-async def enrich_all(context, ads: list[Ad]) -> list[Ad]:
-    sem = asyncio.Semaphore(CONCURRENCY)
-
-    async def _bounded(ad):
-        async with sem:
-            return await enrich_ad(context, ad)
-
-    results = await asyncio.gather(*[_bounded(ad) for ad in ads])
-    return [r for r in results if r is not None]
 
 
 # ── Database ──────────────────────────────────────────────────────────────────
@@ -546,7 +505,7 @@ def upsert_ads(supabase: Client, ads: list[Ad]) -> tuple[int, int]:
 
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
-async def send_telegram_alert(ad: Ad) -> None:
+def send_telegram_alert(ad: Ad) -> None:
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return
     price_str = f"USh {ad.price:,}" if ad.price else "Price not listed"
@@ -562,7 +521,6 @@ async def send_telegram_alert(ad: Ad) -> None:
         f"📌 _{ad.deal_reason}_\n\n"
         f"[View on Jiji]({ad.ad_url})"
     )
-    import urllib.request, json
     payload = json.dumps({
         "chat_id": TELEGRAM_CHAT_ID, "text": text,
         "parse_mode": "Markdown", "disable_web_page_preview": False,
@@ -576,97 +534,88 @@ async def send_telegram_alert(ad: Ad) -> None:
             result = json.loads(resp.read())
             if not result.get("ok"):
                 log.error("Telegram error: %s", result)
+            else:
+                log.info("Telegram alert sent: %.60s", ad.title)
     except Exception as exc:
         log.error("Telegram request failed: %s", exc)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
-async def main() -> None:
+def main() -> None:
+    # Wait for FlareSolverr service to be ready
+    if not wait_for_flaresolverr(max_wait=60):
+        raise RuntimeError("FlareSolverr did not start in time")
+
     supabase    = get_supabase()
     candidates: list[Ad] = []
 
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled",
-                "--window-size=1366,768",
-            ],
-        )
-        context = await make_context(browser)
-        search_page = await context.new_page()
+    # ── 1. Scrape search pages ────────────────────────────────────────────────
+    for item in SEARCH_QUERIES:
+        q_enc = urllib.parse.quote(item["query"])
+        for pnum in range(1, MAX_PAGES + 1):
+            target = (
+                f"{item['base_url']}?query={q_enc}"
+                if pnum == 1
+                else f"{item['base_url']}?query={q_enc}&page={pnum}"
+            )
+            log.info("Fetching '%s' page %d → %s", item["query"], pnum, target)
+            html = flare_get(target)
 
-        # ── Scrape search pages ───────────────────────────────────────────────
-        for item in SEARCH_QUERIES:
-            q_enc = item["query"].replace(" ", "+")
-            for pnum in range(1, MAX_PAGES + 1):
-                url = (
-                    f"{item['base_url']}?query={q_enc}"
-                    if pnum == 1
-                    else f"{item['base_url']}?query={q_enc}&page={pnum}"
-                )
-                slug = f"{item['query'].replace(' ', '_')}_p{pnum}"
-                log.info("Fetching '%s' page %d → %s", item["query"], pnum, url)
+            if not html:
+                log.warning("No HTML — skipping '%s' page %d", item["query"], pnum)
+                break
 
-                html = await load_page(search_page, url, PAGE_TIMEOUT, slug=slug)
+            batch = parse_search_html(html, item["category"], item["query"])
+            log.info("  → %d candidates", len(batch))
 
-                if not html:
-                    log.warning("No HTML returned — skipping")
-                    break
+            if not batch:
+                log.info("  Empty — stopping pagination for '%s'", item["query"])
+                break
 
-                batch = parse_search_html(html, item["category"], item["query"])
-                log.info("  → %d candidates", len(batch))
+            candidates.extend(batch)
+            time.sleep(DELAY_BETWEEN)
 
-                if not batch:
-                    log.info("  Empty — stopping pagination for '%s'", item["query"])
-                    break
+    log.info("Total candidates: %d", len(candidates))
 
-                candidates.extend(batch)
-                await asyncio.sleep(3)  # polite delay between pages
+    # ── 2. Filter known URLs ──────────────────────────────────────────────────
+    try:
+        rows = supabase.table("jiji_deals").select("ad_url").execute()
+        existing_urls = {r["ad_url"] for r in rows.data}
+    except Exception as exc:
+        log.warning("Could not fetch existing URLs: %s", exc)
+        existing_urls = set()
 
-        await search_page.close()
-        log.info("Total candidates: %d", len(candidates))
+    seen_this_run: set[str] = set()
+    new_ads: list[Ad] = []
+    for a in candidates:
+        if a.ad_url not in existing_urls and a.ad_url not in seen_this_run:
+            seen_this_run.add(a.ad_url)
+            new_ads.append(a)
+    log.info("New (not in DB): %d", len(new_ads))
 
-        # ── Filter known URLs ─────────────────────────────────────────────────
-        try:
-            rows = supabase.table("jiji_deals").select("ad_url").execute()
-            existing_urls = {r["ad_url"] for r in rows.data}
-        except Exception as exc:
-            log.warning("Could not fetch existing URLs: %s", exc)
-            existing_urls = set()
-
-        seen_this_run: set[str] = set()
-        new_ads: list[Ad] = []
-        for a in candidates:
-            if a.ad_url not in existing_urls and a.ad_url not in seen_this_run:
-                seen_this_run.add(a.ad_url)
-                new_ads.append(a)
-        log.info("New (not in DB): %d", len(new_ads))
-
-        # ── Enrich ───────────────────────────────────────────────────────────
-        enriched = await enrich_all(context, new_ads)
-        await browser.close()
+    # ── 3. Enrich + broker filter ─────────────────────────────────────────────
+    enriched: list[Ad] = []
+    for ad in new_ads:
+        result = enrich_ad(ad)
+        if result:
+            enriched.append(result)
+        time.sleep(2)
 
     log.info(
         "After broker filter (≤%d ads): kept %d / %d",
         MAX_SELLER_ADS, len(enriched), len(new_ads),
     )
 
+    # ── 4. Persist ────────────────────────────────────────────────────────────
     inserted, skipped = upsert_ads(supabase, enriched)
     log.info("DB — inserted: %d, duplicate-skipped: %d", inserted, skipped)
 
+    # ── 5. Telegram alerts ────────────────────────────────────────────────────
     deals = [a for a in enriched if a.is_deal]
     log.info("Deals this run: %d", len(deals))
     for ad in deals:
-        await send_telegram_alert(ad)
-
-    # Report debug file locations
-    debug_files = list(DEBUG_DIR.glob("*.html"))
-    log.info("Debug HTML files saved (%d): %s", len(debug_files), DEBUG_DIR)
+        send_telegram_alert(ad)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

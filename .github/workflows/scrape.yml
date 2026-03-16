@@ -2,14 +2,33 @@ name: Jiji Deal Scraper
 
 on:
   schedule:
-    - cron: "0 * * * *"
+    - cron: "0 * * * *"   # every hour — FlareSolverr is free, no credit limits
   workflow_dispatch:
 
 jobs:
   scrape:
     name: Scrape Jiji.ug
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
+
+    # ── FlareSolverr runs as a sidecar service alongside the job ──────────────
+    # It starts automatically before the job steps run.
+    # The scraper talks to it on http://localhost:8191/v1
+    services:
+      flaresolverr:
+        image: ghcr.io/flaresolverr/flaresolverr:latest
+        ports:
+          - 8191:8191
+        env:
+          LOG_LEVEL: info
+          LOG_HTML: false
+          CAPTCHA_SOLVER: none
+        options: >-
+          --health-cmd "curl -sf http://localhost:8191/health || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 6
+          --health-start-period 20s
 
     steps:
       - name: Checkout
@@ -21,27 +40,16 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Install Python dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install playwright beautifulsoup4 lxml supabase
-
-      - name: Install Playwright Chromium + deps
-        run: python -m playwright install --with-deps chromium
+          pip install beautifulsoup4 lxml supabase
 
       - name: Run scraper
         env:
-          SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
-          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SUPABASE_URL:      ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:      ${{ secrets.SUPABASE_KEY }}
+          TELEGRAM_TOKEN:    ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
+          FLARESOLVERR_URL:  http://localhost:8191/v1
         run: python scraper.py
-
-      # ── Upload the debug HTML files so we can inspect what Jiji returned ──
-      - name: Upload debug HTML artifacts
-        if: always()   # upload even if scraper step fails
-        uses: actions/upload-artifact@v4
-        with:
-          name: jiji-debug-html-${{ github.run_id }}
-          path: /tmp/jiji_debug/
-          retention-days: 3
