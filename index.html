@@ -1,0 +1,671 @@
+<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Jiji Deal Tracker — Uganda</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,400;0,500;1,400&family=Cabinet+Grotesk:wght@400;500;700;800;900&display=swap" rel="stylesheet" />
+
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            display: ['"Cabinet Grotesk"', 'sans-serif'],
+            mono:    ['"DM Mono"', 'monospace'],
+          }
+        }
+      }
+    }
+  </script>
+
+  <style>
+    :root {
+      --bg:       #0c0d0f;
+      --surface:  #13151a;
+      --border:   #22262f;
+      --border2:  #2d3240;
+      --text:     #e2e6f0;
+      --muted:    #6b7280;
+      --subtle:   #9ca3af;
+      --accent:   #22d3a5;     /* teal-green — feels premium / financial */
+      --accent2:  #f59e0b;     /* amber — deal badges */
+      --danger:   #ef4444;
+      --pin:      #818cf8;     /* indigo — pinned */
+    }
+
+    * { box-sizing: border-box; }
+    html { background: var(--bg); color: var(--text); font-family: 'Cabinet Grotesk', sans-serif; }
+
+    /* ── Grain ── */
+    body::after {
+      content: '';
+      position: fixed; inset: 0; pointer-events: none; z-index: 999;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='300' height='300' filter='url(%23n)' opacity='0.035'/%3E%3C/svg%3E");
+      opacity: 0.4;
+    }
+
+    /* ── Scrollbar ── */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: var(--bg); }
+    ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+    /* ── Inputs ── */
+    input, select {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 10px;
+      padding: 0.55rem 0.9rem;
+      font-family: inherit;
+      font-size: 0.875rem;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    input:focus, select:focus { border-color: var(--accent); }
+    input::placeholder { color: var(--muted); }
+    select { cursor: pointer; appearance: none; }
+
+    /* ── Tab nav ── */
+    .tab-btn {
+      padding: 0.45rem 1.1rem;
+      border-radius: 8px;
+      font-size: 0.82rem;
+      font-weight: 700;
+      font-family: 'DM Mono', monospace;
+      letter-spacing: 0.02em;
+      cursor: pointer;
+      transition: all 0.18s;
+      color: var(--muted);
+      border: 1px solid transparent;
+    }
+    .tab-btn.active {
+      background: var(--accent);
+      color: #0c0d0f;
+      border-color: var(--accent);
+    }
+    .tab-btn:not(.active):hover {
+      color: var(--text);
+      border-color: var(--border2);
+    }
+
+    /* ── Cards ── */
+    .ad-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      overflow: hidden;
+      transition: transform 0.22s ease, box-shadow 0.22s ease, border-color 0.22s;
+      animation: riseIn 0.35s ease both;
+    }
+    .ad-card:hover {
+      transform: translateY(-3px);
+      border-color: var(--border2);
+      box-shadow: 0 12px 36px rgba(0,0,0,0.45);
+    }
+    .ad-card.pinned-card {
+      border-color: var(--pin);
+      box-shadow: 0 0 0 1px rgba(129,140,248,0.25);
+    }
+    .ad-card.deal-card {
+      border-color: rgba(34,211,165,0.35);
+    }
+
+    @keyframes riseIn {
+      from { opacity: 0; transform: translateY(12px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    /* ── Deal badge ── */
+    .deal-badge {
+      background: linear-gradient(135deg, #22d3a5, #059669);
+      color: #022c22;
+      font-family: 'DM Mono', monospace;
+      font-size: 0.62rem;
+      font-weight: 500;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: 2px 8px;
+      border-radius: 999px;
+      animation: dealPulse 2.5s ease-in-out infinite;
+    }
+    @keyframes dealPulse {
+      0%,100% { box-shadow: 0 0 0 0 rgba(34,211,165,0.35); }
+      50%      { box-shadow: 0 0 0 5px rgba(34,211,165,0); }
+    }
+
+    /* ── Pin button ── */
+    .pin-btn {
+      width: 30px; height: 30px;
+      border-radius: 8px;
+      border: 1px solid var(--border2);
+      background: transparent;
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 0.9rem;
+      transition: all 0.18s;
+      color: var(--muted);
+    }
+    .pin-btn:hover  { border-color: var(--pin); color: var(--pin); }
+    .pin-btn.pinned { background: rgba(129,140,248,0.12); border-color: var(--pin); color: var(--pin); }
+
+    /* ── Skeleton ── */
+    .skeleton {
+      background: linear-gradient(90deg, var(--surface) 25%, var(--border) 50%, var(--surface) 75%);
+      background-size: 200% 100%;
+      animation: shimmer 1.6s infinite;
+      border-radius: 12px;
+    }
+    @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+    /* ── Price slider ── */
+    .price-slider { -webkit-appearance: none; appearance: none; width: 100%; height: 3px; border-radius: 2px; background: var(--border2); outline: none; cursor: pointer; }
+    .price-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%; background: var(--accent); border: 2px solid var(--bg); cursor: pointer; }
+
+    /* ── Market range bar ── */
+    .market-bar-wrap { position: relative; height: 4px; background: var(--border2); border-radius: 2px; margin-top: 6px; }
+    .market-bar-fill { position: absolute; height: 100%; background: rgba(34,211,165,0.3); border-radius: 2px; }
+    .market-bar-dot  { position: absolute; width: 8px; height: 8px; border-radius: 50%; top: -2px; transform: translateX(-50%); }
+    .market-bar-dot.price-dot  { background: var(--accent2); }
+    .market-bar-dot.floor-dot  { background: var(--muted); }
+
+    /* ── Stat cards ── */
+    .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 1rem 1.25rem; }
+
+    /* ── Discount pill ── */
+    .discount-pill {
+      font-family: 'DM Mono', monospace;
+      font-size: 0.65rem;
+      font-weight: 500;
+      padding: 2px 7px;
+      border-radius: 6px;
+    }
+    .discount-below { background: rgba(34,211,165,0.12); color: var(--accent); }
+    .discount-above { background: rgba(239,68,68,0.1);   color: var(--danger); }
+
+    /* ── Note textarea ── */
+    .note-area {
+      width: 100%; resize: none; font-size: 0.78rem;
+      background: rgba(255,255,255,0.03); border: 1px solid var(--border2);
+      border-radius: 8px; color: var(--subtle); padding: 6px 8px;
+      font-family: 'DM Mono', monospace; outline: none;
+      transition: border-color 0.2s;
+    }
+    .note-area:focus { border-color: var(--pin); }
+  </style>
+</head>
+<body class="min-h-screen">
+
+  <!-- ══ HEADER ══════════════════════════════════════════════════════════════ -->
+  <header style="background:var(--surface);border-bottom:1px solid var(--border);"
+          class="sticky top-0 z-40 backdrop-blur-md">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-14 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <div class="w-7 h-7 rounded-lg flex items-center justify-center font-black text-sm"
+             style="background:var(--accent);color:#022c22;">J</div>
+        <span class="font-display font-black text-base" style="color:var(--text);">Jiji Tracker</span>
+        <span class="font-mono text-xs hidden sm:inline" style="color:var(--muted);">/ Uganda Deals</span>
+      </div>
+      <div class="flex items-center gap-3">
+        <span class="w-1.5 h-1.5 rounded-full animate-pulse" style="background:var(--accent);"></span>
+        <span class="font-mono text-xs" style="color:var(--muted);" id="last-refresh">—</span>
+      </div>
+    </div>
+  </header>
+
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+
+    <!-- ══ STAT ROW ════════════════════════════════════════════════════════════ -->
+    <div id="stats-row" class="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-6">
+      <div class="skeleton h-16 col-span-1"></div>
+      <div class="skeleton h-16 col-span-1"></div>
+      <div class="skeleton h-16 col-span-1"></div>
+      <div class="skeleton h-16 col-span-1"></div>
+      <div class="skeleton h-16 col-span-1"></div>
+    </div>
+
+    <!-- ══ TAB NAV ═════════════════════════════════════════════════════════════ -->
+    <div class="flex items-center gap-2 mb-5 flex-wrap">
+      <button class="tab-btn active" onclick="setTab('all')"       id="tab-all">All Listings</button>
+      <button class="tab-btn"        onclick="setTab('deals')"     id="tab-deals">🔥 Hot Deals</button>
+      <button class="tab-btn"        onclick="setTab('watchlist')" id="tab-watchlist">📌 Watchlist</button>
+    </div>
+
+    <!-- ══ FILTERS ════════════════════════════════════════════════════════════ -->
+    <div class="rounded-2xl p-4 mb-5" style="background:var(--surface);border:1px solid var(--border);">
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+
+        <!-- Search -->
+        <div class="lg:col-span-2 relative">
+          <svg class="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 pointer-events-none"
+               style="color:var(--muted);" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                  d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+          </svg>
+          <input id="search-input" type="search" placeholder="Search titles…" class="w-full pl-9" />
+        </div>
+
+        <!-- Category -->
+        <div class="relative">
+          <select id="cat-filter" class="w-full pr-8">
+            <option value="all">All Categories</option>
+            <option value="cars">🚗 Cars</option>
+            <option value="land">🌿 Land</option>
+          </select>
+          <svg class="absolute right-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 pointer-events-none"
+               style="color:var(--muted);" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+          </svg>
+        </div>
+
+        <!-- Sort -->
+        <div class="relative">
+          <select id="sort-select" class="w-full pr-8">
+            <option value="newest">Newest first</option>
+            <option value="price_asc">Price ↑</option>
+            <option value="price_desc">Price ↓</option>
+            <option value="discount">Biggest discount</option>
+          </select>
+          <svg class="absolute right-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 pointer-events-none"
+               style="color:var(--muted);" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+          </svg>
+        </div>
+      </div>
+
+      <!-- Price slider -->
+      <div class="mt-4">
+        <div class="flex justify-between items-center mb-2">
+          <label class="font-mono text-xs uppercase tracking-widest" style="color:var(--muted);">Max Price</label>
+          <span id="price-label" class="font-mono text-xs font-medium" style="color:var(--accent);">Any</span>
+        </div>
+        <input type="range" class="price-slider" id="price-slider"
+               min="0" max="300000000" step="1000000" value="300000000" />
+        <div class="flex justify-between font-mono text-xs mt-1" style="color:var(--muted);">
+          <span>0</span><span>50M</span><span>100M</span><span>200M</span><span>300M+</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══ RESULT COUNT ════════════════════════════════════════════════════════ -->
+    <div class="flex items-center justify-between mb-4">
+      <p class="font-mono text-xs" style="color:var(--muted);">
+        <span id="result-count" style="color:var(--text);font-weight:700;">—</span> listings
+      </p>
+    </div>
+
+    <!-- Error banner -->
+    <div id="error-banner" class="hidden rounded-xl px-4 py-3 mb-5 font-mono text-sm"
+         style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.3);color:#fca5a5;"></div>
+
+    <!-- ══ CARDS GRID ══════════════════════════════════════════════════════════ -->
+    <div id="cards-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+      <!-- skeleton placeholders -->
+      <div class="skeleton h-72"></div><div class="skeleton h-72"></div>
+      <div class="skeleton h-72"></div><div class="skeleton h-72"></div>
+      <div class="skeleton h-72"></div><div class="skeleton h-72"></div>
+      <div class="skeleton h-72"></div><div class="skeleton h-72"></div>
+    </div>
+
+    <!-- Empty state -->
+    <div id="empty-state" class="hidden text-center py-24">
+      <div class="text-5xl mb-4">🔍</div>
+      <p class="font-display font-bold text-lg" style="color:var(--text);">No listings match</p>
+      <p class="font-mono text-sm mt-1" style="color:var(--muted);">Try adjusting the filters above.</p>
+    </div>
+
+  </div><!-- /max-w -->
+
+  <!-- ══ SCRIPT ══════════════════════════════════════════════════════════════ -->
+  <script>
+  // ─── CONFIG ─────────────────────────────────────────────────────────────────
+  // Replace these two values with your Supabase project URL and anon key.
+  const SUPABASE_URL      = "https://YOUR_PROJECT_ID.supabase.co";
+  const SUPABASE_ANON_KEY = "YOUR_SUPABASE_ANON_KEY";
+  const TABLE = "jiji_deals";
+
+  // localStorage key for pinned IDs (persists across sessions locally)
+  const PIN_KEY  = "jiji_pinned_ids";
+  const NOTE_KEY = "jiji_notes";
+
+  // ─── STATE ──────────────────────────────────────────────────────────────────
+  let allAds    = [];
+  let activeTab = "all";  // "all" | "deals" | "watchlist"
+
+  // Local pin store (we also write back to Supabase)
+  function getPinned()  { try { return new Set(JSON.parse(localStorage.getItem(PIN_KEY)  || "[]")); } catch { return new Set(); } }
+  function getNotes()   { try { return JSON.parse(localStorage.getItem(NOTE_KEY) || "{}"); } catch { return {}; } }
+  function savePinned(s) { localStorage.setItem(PIN_KEY, JSON.stringify([...s])); }
+  function saveNotes(n)  { localStorage.setItem(NOTE_KEY, JSON.stringify(n)); }
+
+  // ─── FETCH ──────────────────────────────────────────────────────────────────
+  async function fetchAds() {
+    const url = new URL(`${SUPABASE_URL}/rest/v1/${TABLE}`);
+    url.searchParams.set("select", "*");
+    url.searchParams.set("order", "created_at.desc");
+    url.searchParams.set("limit", "500");
+    url.searchParams.set("is_archived", "eq.false");
+
+    const res = await fetch(url.toString(), {
+      headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
+    });
+    if (!res.ok) throw new Error(`Supabase ${res.status}: ${await res.text()}`);
+    return res.json();
+  }
+
+  // Patch a single row in Supabase (for pinning)
+  async function patchAd(id, data) {
+    const url = `${SUPABASE_URL}/rest/v1/${TABLE}?id=eq.${id}`;
+    await fetch(url, {
+      method: "PATCH",
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        "Content-Type": "application/json",
+        Prefer: "return=minimal",
+      },
+      body: JSON.stringify(data),
+    });
+  }
+
+  // ─── HELPERS ────────────────────────────────────────────────────────────────
+  function fmt(n) {
+    if (n == null) return "—";
+    if (n >= 1_000_000) return `USh ${(n/1_000_000).toFixed(1)}M`;
+    return `USh ${n.toLocaleString()}`;
+  }
+
+  function discountPct(price, floor) {
+    if (!price || !floor || floor === 0) return null;
+    return Math.round(((floor - price) / floor) * 100);
+  }
+
+  function timeAgo(iso) {
+    if (!iso) return "";
+    const diff = Date.now() - new Date(iso).getTime();
+    const m = Math.floor(diff / 60_000);
+    if (m < 60)  return `${m}m ago`;
+    const h = Math.floor(m / 60);
+    if (h < 24)  return `${h}h ago`;
+    return `${Math.floor(h/24)}d ago`;
+  }
+
+  function esc(s) {
+    if (!s) return "";
+    return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  }
+
+  // ─── MARKET PRICE BAR ───────────────────────────────────────────────────────
+  function marketBar(price, low, high) {
+    if (!low || !high || !price) return "";
+    const span  = high - low;
+    if (span <= 0) return "";
+    const floorPct = 0;
+    const ceilPct  = 100;
+    // price dot position (can go below 0 if cheaper than floor)
+    const pricePct = Math.max(0, Math.min(100, ((price - low) / span) * 100));
+    const priceBelowFloor = price < low;
+
+    return `
+      <div class="mt-2">
+        <div class="flex justify-between font-mono text-xs mb-1" style="color:var(--muted);">
+          <span>${fmt(low)}</span><span>${fmt(high)}</span>
+        </div>
+        <div class="market-bar-wrap">
+          <div class="market-bar-fill" style="left:0;right:0;"></div>
+          ${priceBelowFloor ? "" : `<div class="market-bar-dot price-dot" style="left:${pricePct}%;"></div>`}
+        </div>
+        <p class="font-mono text-xs mt-1" style="color:var(--muted);">Jiji market range</p>
+      </div>`;
+  }
+
+  // ─── BUILD CARD ─────────────────────────────────────────────────────────────
+  function buildCard(ad, idx) {
+    const pinned  = getPinned().has(ad.id);
+    const notes   = getNotes();
+    const note    = notes[ad.id] || "";
+
+    const pct     = discountPct(ad.price, ad.market_price_low);
+    const hasMkt  = ad.market_price_low != null;
+
+    const dealBadge = ad.is_deal
+      ? `<span class="deal-badge">🔥 Deal</span>` : "";
+
+    const discPill = pct != null
+      ? `<span class="discount-pill ${pct >= 0 ? 'discount-below' : 'discount-above'}">
+           ${pct >= 0 ? `${pct}% below mkt` : `${Math.abs(pct)}% above mkt`}
+         </span>`
+      : "";
+
+    const catIcon = ad.category === "cars" ? "🚗" : "🌿";
+    const img = ad.image_url
+      ? `<img src="${esc(ad.image_url)}" alt="" loading="lazy"
+              class="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
+              onerror="this.parentElement.innerHTML='<div style=\'display:flex;align-items:center;justify-content:center;height:100%;font-size:2.5rem;color:var(--muted)\'>${catIcon}</div>'" />`
+      : `<div style="display:flex;align-items:center;justify-content:center;height:100%;font-size:2.5rem;color:var(--muted);">${catIcon}</div>`;
+
+    const mktBar = marketBar(ad.price, ad.market_price_low, ad.market_price_high);
+
+    return `
+      <article class="ad-card group ${pinned ? 'pinned-card' : ''} ${ad.is_deal ? 'deal-card' : ''}"
+               style="animation-delay:${idx*35}ms" data-id="${ad.id}">
+        <!-- Image -->
+        <div class="relative overflow-hidden" style="height:160px;background:var(--bg);">
+          ${img}
+          <div class="absolute top-2 left-2 flex gap-1.5 flex-wrap">
+            <span class="font-mono text-xs px-2 py-0.5 rounded-full"
+                  style="background:rgba(0,0,0,0.6);color:var(--subtle);">${ad.category}</span>
+            ${dealBadge}
+          </div>
+          <button class="pin-btn absolute top-2 right-2 ${pinned ? 'pinned' : ''}"
+                  onclick="togglePin(${ad.id}, this)" title="${pinned ? 'Unpin' : 'Pin to watchlist'}">
+            ${pinned ? '📌' : '🔖'}
+          </button>
+        </div>
+
+        <!-- Body -->
+        <div class="p-3.5">
+          <h3 class="font-display font-bold text-sm leading-tight line-clamp-2 mb-2"
+              style="color:var(--text);">${esc(ad.title)}</h3>
+
+          <!-- Price row -->
+          <div class="flex items-center gap-2 flex-wrap mb-1">
+            <span class="font-mono font-medium text-base" style="color:var(--accent);">
+              ${fmt(ad.price)}
+            </span>
+            ${discPill}
+          </div>
+
+          ${mktBar}
+
+          <!-- Location + seller -->
+          <div class="mt-2.5 flex flex-col gap-1">
+            <div class="flex items-center gap-1.5 font-mono text-xs" style="color:var(--muted);">
+              <span>📍</span><span class="truncate">${esc(ad.location || "Uganda")}</span>
+            </div>
+            ${ad.seller_name ? `
+            <div class="flex items-center gap-1.5 font-mono text-xs" style="color:var(--muted);">
+              <span>👤</span>
+              <span class="truncate">${esc(ad.seller_name)}</span>
+              <span class="px-1.5 py-0.5 rounded-md text-xs" style="background:var(--border);color:var(--subtle);">
+                ${ad.seller_ad_count} ad${ad.seller_ad_count !== 1 ? 's' : ''}
+              </span>
+            </div>` : ""}
+            ${ad.deal_reason ? `
+            <div class="font-mono text-xs truncate" style="color:var(--accent);" title="${esc(ad.deal_reason)}">
+              📌 ${esc(ad.deal_reason)}
+            </div>` : ""}
+          </div>
+
+          <!-- Note (shown only if pinned) -->
+          ${pinned ? `
+          <div class="mt-2.5">
+            <textarea class="note-area" rows="2"
+                      placeholder="Add a note…"
+                      onchange="saveNote(${ad.id}, this.value)">${esc(note)}</textarea>
+          </div>` : ""}
+
+          <!-- Footer -->
+          <div class="flex items-center justify-between mt-3 pt-3"
+               style="border-top:1px solid var(--border);">
+            <span class="font-mono text-xs" style="color:var(--muted);">${timeAgo(ad.created_at)}</span>
+            <a href="${esc(ad.ad_url)}" target="_blank" rel="noopener noreferrer"
+               class="font-mono text-xs font-medium px-3 py-1.5 rounded-lg transition-all"
+               style="background:rgba(34,211,165,0.1);color:var(--accent);border:1px solid rgba(34,211,165,0.2);"
+               onmouseover="this.style.background='var(--accent)';this.style.color='#022c22';"
+               onmouseout="this.style.background='rgba(34,211,165,0.1)';this.style.color='var(--accent)';">
+              View →
+            </a>
+          </div>
+        </div>
+      </article>`;
+  }
+
+  // ─── STATS ──────────────────────────────────────────────────────────────────
+  function renderStats(ads) {
+    const pinned = getPinned();
+    const stats = [
+      { label: "Total",    value: ads.length,                         icon: "📋" },
+      { label: "Cars",     value: ads.filter(a=>a.category==='cars').length, icon: "🚗" },
+      { label: "Land",     value: ads.filter(a=>a.category==='land').length, icon: "🌿" },
+      { label: "Deals",    value: ads.filter(a=>a.is_deal).length,    icon: "🔥" },
+      { label: "Watchlist",value: pinned.size,                        icon: "📌" },
+    ];
+    document.getElementById("stats-row").innerHTML = stats.map((s,i) => `
+      <div class="stat-card" style="animation:riseIn 0.3s ease ${i*60}ms both;">
+        <div class="text-xl mb-0.5">${s.icon}</div>
+        <div class="font-display font-black text-2xl" style="color:var(--text);">${s.value}</div>
+        <div class="font-mono text-xs uppercase tracking-widest" style="color:var(--muted);">${s.label}</div>
+      </div>`).join("");
+  }
+
+  // ─── FILTER + RENDER ────────────────────────────────────────────────────────
+  function applyFilters() {
+    const q        = document.getElementById("search-input").value.toLowerCase().trim();
+    const cat      = document.getElementById("cat-filter").value;
+    const maxPrice = parseInt(document.getElementById("price-slider").value, 10);
+    const sort     = document.getElementById("sort-select").value;
+    const pinned   = getPinned();
+
+    let list = allAds.filter(ad => {
+      if (cat !== "all" && ad.category !== cat) return false;
+      if (q && !ad.title.toLowerCase().includes(q)) return false;
+      if (ad.price && ad.price > maxPrice) return false;
+      if (activeTab === "deals"     && !ad.is_deal) return false;
+      if (activeTab === "watchlist" && !pinned.has(ad.id)) return false;
+      return true;
+    });
+
+    // Sort
+    if (sort === "price_asc")  list.sort((a,b) => (a.price||0)-(b.price||0));
+    if (sort === "price_desc") list.sort((a,b) => (b.price||0)-(a.price||0));
+    if (sort === "discount") {
+      list.sort((a,b) => {
+        const dA = discountPct(a.price, a.market_price_low) ?? -999;
+        const dB = discountPct(b.price, b.market_price_low) ?? -999;
+        return dB - dA;
+      });
+    }
+
+    document.getElementById("result-count").textContent = list.length;
+    const grid  = document.getElementById("cards-grid");
+    const empty = document.getElementById("empty-state");
+
+    if (!list.length) {
+      grid.innerHTML = "";
+      empty.classList.remove("hidden");
+    } else {
+      empty.classList.add("hidden");
+      grid.innerHTML = list.map((ad,i) => buildCard(ad, i)).join("");
+    }
+  }
+
+  // ─── TAB ────────────────────────────────────────────────────────────────────
+  function setTab(tab) {
+    activeTab = tab;
+    ["all","deals","watchlist"].forEach(t => {
+      const btn = document.getElementById(`tab-${t}`);
+      btn.classList.toggle("active", t === tab);
+    });
+    applyFilters();
+  }
+
+  // ─── PIN ────────────────────────────────────────────────────────────────────
+  function togglePin(id, btn) {
+    const pinned = getPinned();
+    const wasPinned = pinned.has(id);
+    if (wasPinned) pinned.delete(id); else pinned.add(id);
+    savePinned(pinned);
+
+    // Optimistic UI update on the card
+    const card = btn.closest("article");
+    if (wasPinned) {
+      card.classList.remove("pinned-card");
+      btn.classList.remove("pinned");
+      btn.textContent = "🔖";
+    } else {
+      card.classList.add("pinned-card");
+      btn.classList.add("pinned");
+      btn.textContent = "📌";
+    }
+
+    // Write to Supabase (best-effort, non-blocking)
+    patchAd(id, { is_pinned: !wasPinned }).catch(() => {});
+
+    // Re-render stats count
+    renderStats(allAds);
+
+    // If on watchlist tab and unpinning, re-render
+    if (activeTab === "watchlist") applyFilters();
+  }
+
+  function saveNote(id, text) {
+    const notes = getNotes();
+    notes[id] = text;
+    saveNotes(notes);
+    // Write to Supabase
+    patchAd(id, { pin_note: text }).catch(() => {});
+  }
+
+  // ─── PRICE SLIDER LABEL ─────────────────────────────────────────────────────
+  document.getElementById("price-slider").addEventListener("input", function() {
+    const v = parseInt(this.value, 10);
+    document.getElementById("price-label").textContent =
+      v >= 300_000_000 ? "Any" : `USh ${(v/1_000_000).toFixed(0)}M`;
+    applyFilters();
+  });
+
+  // Live filter
+  ["search-input","cat-filter","sort-select"].forEach(id =>
+    document.getElementById(id).addEventListener("input", applyFilters)
+  );
+
+  // ─── INIT ───────────────────────────────────────────────────────────────────
+  (async () => {
+    try {
+      allAds = await fetchAds();
+
+      // Merge local pin state into data
+      const pinned = getPinned();
+      allAds.forEach(ad => { if (pinned.has(ad.id)) ad.is_pinned = true; });
+
+      document.getElementById("last-refresh").textContent =
+        `updated ${new Date().toLocaleTimeString()}`;
+
+      renderStats(allAds);
+      applyFilters();
+    } catch (err) {
+      console.error(err);
+      const b = document.getElementById("error-banner");
+      b.textContent = `⚠ ${err.message}. Make sure SUPABASE_URL and SUPABASE_ANON_KEY are set in index.html.`;
+      b.classList.remove("hidden");
+      document.getElementById("cards-grid").innerHTML = "";
+      document.getElementById("stats-row").innerHTML = "";
+    }
+  })();
+  </script>
+</body>
+</html>
