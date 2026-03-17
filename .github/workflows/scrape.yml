@@ -2,18 +2,15 @@ name: Jiji Deal Scraper
 
 on:
   schedule:
-    - cron: "0 * * * *"   # every hour — FlareSolverr is free, no credit limits
+    - cron: "0 * * * *"   # every hour
   workflow_dispatch:
 
 jobs:
   scrape:
     name: Scrape Jiji.ug
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45      # increased from 25 — concurrent enrichment ~8-12 min
 
-    # ── FlareSolverr runs as a sidecar service alongside the job ──────────────
-    # It starts automatically before the job steps run.
-    # The scraper talks to it on http://localhost:8191/v1
     services:
       flaresolverr:
         image: ghcr.io/flaresolverr/flaresolverr:latest

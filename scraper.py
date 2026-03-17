@@ -1,29 +1,24 @@
 """
-Jiji.ug Deal Scraper — v6
+Jiji.ug Deal Scraper — v8
 ━━━━━━━━━━━━━━━━━━━━━━━━━
-CLOUDFLARE BYPASS: FlareSolverr
-  FlareSolverr runs as a local Docker service inside GitHub Actions.
-  It spins up a real Chrome browser with undetected-chromedriver,
-  solves Cloudflare challenges, and returns the rendered HTML via
-  a simple HTTP API on localhost:8191.
+FIXES over v7 (timeout at 25 min):
+  - Enrichment is now CONCURRENT (3 detail pages in parallel via threads)
+    120 ads / 3 concurrent × 12s each = ~8 minutes total ✓
+  - Only scrapes page 1 per query on first run to stay well within time limits
+    (MAX_SEARCH_PAGES = 1). Subsequent runs skip already-stored URLs so
+    later pages are rarely needed anyway.
+  - FlareSolverr session reuse: open one session per batch instead of
+    a new browser per request (saves ~2s per request).
+  - Workflow timeout raised to 45 min as a safety net.
 
-  No API keys. No costs. Completely free and open source.
-  https://github.com/FlareSolverr/FlareSolverr
-
-HOW IT WORKS:
-  We POST to http://localhost:8191/v1 with:
-    { "cmd": "request.get", "url": "https://jiji.ug/cars?query=...", "maxTimeout": 60000 }
-  FlareSolverr returns:
-    { "solution": { "response": "<html>...</html>", "status": 200 } }
+FlareSolverr runs as a GitHub Actions service container — no costs, no keys.
 
 Required env vars:
   SUPABASE_URL       — Supabase project URL
   SUPABASE_KEY       — Supabase service_role key
   TELEGRAM_TOKEN     — Telegram bot token  (optional)
   TELEGRAM_CHAT_ID   — Telegram chat/channel ID  (optional)
-
-FlareSolverr is started automatically by the GitHub Actions workflow
-as a service container — no setup needed beyond the workflow file.
+  FLARESOLVERR_URL   — set by workflow (http://localhost:8191/v1)
 """
 
 import os
@@ -33,8 +28,10 @@ import time
 import logging
 import urllib.request
 import urllib.parse
+import threading
 from dataclasses import dataclass, field
 from typing import Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from bs4 import BeautifulSoup
 from supabase import create_client, Client
@@ -51,41 +48,27 @@ SUPABASE_URL: str     = os.environ["SUPABASE_URL"]
 SUPABASE_KEY: str     = os.environ["SUPABASE_KEY"]
 TELEGRAM_TOKEN: str   = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID: str = os.environ.get("TELEGRAM_CHAT_ID", "")
+FLARESOLVERR_URL      = os.environ.get("FLARESOLVERR_URL", "http://localhost:8191/v1")
 
-FLARESOLVERR_URL = os.environ.get("FLARESOLVERR_URL", "http://localhost:8191/v1")
-MAX_TIMEOUT      = 60_000   # ms — passed to FlareSolverr per request
-MAX_SELLER_ADS   = 3
-MAX_PAGES        = 3
-RETRY_ATTEMPTS   = 2
-DELAY_BETWEEN    = 3        # seconds between requests
+MAX_TIMEOUT       = 60_000  # ms per FlareSolverr request
+MAX_SELLER_ADS    = 3
+MAX_SEARCH_PAGES  = 1       # pages per query — keep low to stay under time limit
+                            # increase to 2-3 once you have a paid Actions plan
+                            # or self-hosted runner with no timeout concerns
+ENRICH_WORKERS    = 3       # parallel detail-page fetches
+RETRY_ATTEMPTS    = 2
+PAGE_DELAY        = 2       # seconds between search pages
 
 SEARCH_QUERIES = [
-    {
-        "query":    "Toyota Harrier",
-        "category": "cars",
-        "base_url": "https://jiji.ug/cars",
-    },
-    {
-        "query":    "Toyota Vanguard",
-        "category": "cars",
-        "base_url": "https://jiji.ug/cars",
-    },
-    {
-        "query":    "Subaru Forester",
-        "category": "cars",
-        "base_url": "https://jiji.ug/cars",
-    },
-    {
-        "query":    "Busiika",
-        "category": "land",
-        "base_url": "https://jiji.ug/land-plots-for-sale",
-    },
-    {
-        "query":    "Namulonge",
-        "category": "land",
-        "base_url": "https://jiji.ug/land-plots-for-sale",
-    },
+    {"query": "Toyota Harrier",  "category": "cars", "base_url": "https://jiji.ug/cars"},
+    {"query": "Toyota Vanguard", "category": "cars", "base_url": "https://jiji.ug/cars"},
+    {"query": "Subaru Forester", "category": "cars", "base_url": "https://jiji.ug/cars"},
+    {"query": "Busiika",         "category": "land", "base_url": "https://jiji.ug/land-plots-for-sale"},
+    {"query": "Namulonge",       "category": "land", "base_url": "https://jiji.ug/land-plots-for-sale"},
 ]
+
+# Thread-safe print lock
+_log_lock = threading.Lock()
 
 
 # ── Data model ────────────────────────────────────────────────────────────────
@@ -121,17 +104,27 @@ class Ad:
             )
 
 
+# ── URL cleaner ───────────────────────────────────────────────────────────────
+def clean_jiji_url(raw: str) -> str:
+    """Strip Jiji tracking params: /name-ID.html?page=2&pos=21... → /name-ID.html"""
+    if not raw:
+        return raw
+    if raw.startswith("/"):
+        raw = "https://jiji.ug" + raw
+    m = re.match(r"(https://jiji\.ug/[^?#]+\.html)", raw)
+    if m:
+        return m.group(1)
+    return raw.split("#")[0]
+
+
 # ── Price helpers ─────────────────────────────────────────────────────────────
 def parse_ugx(raw: str) -> Optional[int]:
     if not raw:
         return None
     text = (
         raw.upper()
-           .replace(",", "")
-           .replace("\xa0", "")
-           .replace(" ", "")
-           .replace("USH", "")
-           .replace("UGX", "")
+           .replace(",", "").replace("\xa0", "").replace(" ", "")
+           .replace("USH", "").replace("UGX", "")
     )
     m = re.search(r"([\d.]+)M", text)
     if m:
@@ -151,7 +144,7 @@ def parse_market_range(text: str) -> tuple[Optional[int], Optional[int]]:
     if len(parts) < 2:
         return None, None
 
-    def _extract(s: str) -> Optional[int]:
+    def _ex(s: str) -> Optional[int]:
         m = re.search(r"([\d.]+)M", s)
         if m:
             return int(float(m.group(1)) * 1_000_000)
@@ -160,103 +153,134 @@ def parse_market_range(text: str) -> tuple[Optional[int], Optional[int]]:
             return int(m.group(1))
         return None
 
-    return _extract(parts[0]), _extract(parts[1])
+    return _ex(parts[0]), _ex(parts[1])
 
 
-# ── FlareSolverr fetch ────────────────────────────────────────────────────────
+# ── FlareSolverr ──────────────────────────────────────────────────────────────
+# One persistent session ID per run — avoids re-solving Cloudflare each time
+_fs_session_id: Optional[str] = None
+_fs_session_lock = threading.Lock()
+
+
+def _fs_create_session() -> Optional[str]:
+    """Create a FlareSolverr browser session and return its ID."""
+    payload = json.dumps({"cmd": "sessions.create"}).encode()
+    try:
+        req = urllib.request.Request(
+            FLARESOLVERR_URL, data=payload,
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read())
+            if data.get("status") == "ok":
+                sid = data.get("session")
+                log.info("FlareSolverr session created: %s", sid)
+                return sid
+    except Exception as exc:
+        log.warning("Could not create FlareSolverr session: %s", exc)
+    return None
+
+
+def _fs_destroy_session(session_id: str) -> None:
+    payload = json.dumps({"cmd": "sessions.destroy", "session": session_id}).encode()
+    try:
+        req = urllib.request.Request(
+            FLARESOLVERR_URL, data=payload,
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        urllib.request.urlopen(req, timeout=10)
+    except Exception:
+        pass
+
+
 def flare_get(target_url: str) -> Optional[str]:
-    """
-    Ask FlareSolverr to fetch target_url through a real Chrome browser.
-    Returns the rendered HTML string, or None on failure.
-    """
-    payload = json.dumps({
+    """Fetch target_url via FlareSolverr. Thread-safe. Returns HTML or None."""
+    global _fs_session_id
+
+    # Lazily create a shared session
+    with _fs_session_lock:
+        if _fs_session_id is None:
+            _fs_session_id = _fs_create_session()
+
+    body: dict = {
         "cmd":        "request.get",
         "url":        target_url,
         "maxTimeout": MAX_TIMEOUT,
-    }).encode()
+    }
+    if _fs_session_id:
+        body["session"] = _fs_session_id
+
+    payload = json.dumps(body).encode()
 
     for attempt in range(1, RETRY_ATTEMPTS + 1):
         try:
             req = urllib.request.Request(
-                FLARESOLVERR_URL,
-                data=payload,
-                headers={"Content-Type": "application/json"},
-                method="POST",
+                FLARESOLVERR_URL, data=payload,
+                headers={"Content-Type": "application/json"}, method="POST",
             )
-            with urllib.request.urlopen(req, timeout=MAX_TIMEOUT // 1000 + 10) as resp:
+            with urllib.request.urlopen(req, timeout=MAX_TIMEOUT // 1000 + 15) as resp:
                 data = json.loads(resp.read())
 
-            status  = data.get("status", "")
+            status   = data.get("status", "")
             solution = data.get("solution", {})
-            html    = solution.get("response", "")
-            http_status = solution.get("status", 0)
+            html     = solution.get("response", "")
+            http_st  = solution.get("status", 0)
 
-            log.info(
-                "  FlareSolverr status=%s HTTP=%s bytes=%d",
-                status, http_status, len(html),
-            )
+            with _log_lock:
+                log.info("  FS: status=%s HTTP=%s bytes=%d url=%.60s",
+                         status, http_st, len(html), target_url)
 
             if status != "ok":
-                log.warning("  FlareSolverr returned status=%s: %s", status, data.get("message", ""))
+                log.warning("  FS error: %s", data.get("message", ""))
                 if attempt < RETRY_ATTEMPTS:
                     time.sleep(5)
                 continue
 
-            # Check we actually got past Cloudflare
             if "Just a moment" in html or "Performing security verification" in html:
-                log.warning(
-                    "  Still got Cloudflare challenge page (attempt %d/%d)",
-                    attempt, RETRY_ATTEMPTS,
-                )
+                log.warning("  CF challenge not solved (attempt %d/%d)", attempt, RETRY_ATTEMPTS)
+                # Invalidate session so a fresh one is created next call
+                with _fs_session_lock:
+                    _fs_session_id = None
                 if attempt < RETRY_ATTEMPTS:
-                    time.sleep(8)
+                    time.sleep(10)
                 continue
 
             return html
 
         except Exception as exc:
-            log.error("  FlareSolverr request error (attempt %d): %s", attempt, exc)
+            log.error("  FS request error (attempt %d): %s", attempt, exc)
             if attempt < RETRY_ATTEMPTS:
                 time.sleep(5)
 
     return None
 
 
-def wait_for_flaresolverr(max_wait: int = 30) -> bool:
-    """Poll FlareSolverr health endpoint until it's ready."""
-    log.info("Waiting for FlareSolverr to be ready...")
-    health_url = FLARESOLVERR_URL.replace("/v1", "/health")
-    # fallback: just hit /v1 with a dummy payload
+def wait_for_flaresolverr(max_wait: int = 60) -> bool:
+    log.info("Waiting for FlareSolverr (max %ds)...", max_wait)
+    health = FLARESOLVERR_URL.replace("/v1", "/health")
     for i in range(max_wait):
         try:
-            req = urllib.request.Request(
-                health_url,
-                headers={"Content-Type": "application/json"},
-            )
-            with urllib.request.urlopen(req, timeout=3) as resp:
+            with urllib.request.urlopen(health, timeout=3) as resp:
                 body = json.loads(resp.read())
-                if body.get("status") == "ok" or resp.status == 200:
+                if body.get("status") == "ok":
                     log.info("FlareSolverr ready after %ds", i)
                     return True
         except Exception:
             pass
         time.sleep(1)
-    log.error("FlareSolverr did not become ready within %ds", max_wait)
+    log.error("FlareSolverr not ready after %ds", max_wait)
     return False
 
 
 # ── Search-page parser ────────────────────────────────────────────────────────
-def parse_search_html(html: str, category: str, query: str) -> list["Ad"]:
+def parse_search_html(html: str, category: str, query: str) -> list[Ad]:
     soup = BeautifulSoup(html, "lxml")
     ads:  list[Ad] = []
 
-    page_title = soup.title.string if soup.title else "none"
-    log.info(
-        "  Page title='%s' | size=%d | has_advert=%s",
-        page_title, len(html), "advert" in html.lower(),
-    )
+    log.info("  Page: '%s' | %d chars",
+             (soup.title.string or "none") if soup.title else "none", len(html))
 
-    # Primary selectors
+    # Primary card selectors
     cards = (
         soup.select("article.b-list-advert__item")
         or soup.select("div.b-list-advert__item")
@@ -273,28 +297,24 @@ def parse_search_html(html: str, category: str, query: str) -> list["Ad"]:
                 ads.append(ad)
         return ads
 
-    # Fallback: scan all anchors for listing URLs
-    log.info("  No card elements — trying link scan")
+    # Fallback: href scan for listing URLs
     seen: set[str] = set()
     for a in soup.find_all("a", href=True):
         href: str = a["href"]
-        if not re.search(
-            r"/(cars|land|vehicles|property|land-plots)/[\w-]+-\w{10,}", href
-        ):
+        if not re.search(r"/[\w-]+/[\w-]+/[\w-]+-\w{10,}\.html", href):
             continue
-        full_url = href if href.startswith("http") else f"https://jiji.ug{href}"
-        if full_url in seen:
+        clean_url = clean_jiji_url(href)
+        if clean_url in seen:
             continue
-        seen.add(full_url)
+        seen.add(clean_url)
         title = a.get_text(strip=True)[:200] or "Untitled"
         ads.append(Ad(
             title=title, price=None, location="Uganda",
-            image_url="", ad_url=full_url,
+            image_url="", ad_url=clean_url,
             category=category, query=query,
         ))
 
-    if ads:
-        log.info("  Link-scan found %d stubs", len(ads))
+    log.info("  Link-scan found %d stubs", len(ads))
     return ads
 
 
@@ -304,8 +324,7 @@ def _parse_card(card, category: str, query: str) -> Optional[Ad]:
             card.select_one("span.b-advert-title-inner")
             or card.select_one("div.b-advert-title")
             or card.select_one("[class*='title']")
-            or card.select_one("h3")
-            or card.select_one("h2")
+            or card.select_one("h3") or card.select_one("h2")
         )
         title = title_el.get_text(strip=True) if title_el else ""
         if not title:
@@ -330,18 +349,15 @@ def _parse_card(card, category: str, query: str) -> Optional[Ad]:
         image_url = ""
         if img_el:
             image_url = (
-                img_el.get("data-src")
-                or img_el.get("src")
-                or img_el.get("data-lazy")
-                or ""
+                img_el.get("data-src") or img_el.get("src")
+                or img_el.get("data-lazy") or ""
             )
 
         link_el = card.select_one("a[href]")
         if not link_el:
             return None
-        href = link_el["href"]
-        ad_url = href if href.startswith("http") else f"https://jiji.ug{href}"
 
+        ad_url = clean_jiji_url(link_el["href"])
         return Ad(
             title=title, price=price, location=location,
             image_url=image_url, ad_url=ad_url,
@@ -354,18 +370,22 @@ def _parse_card(card, category: str, query: str) -> Optional[Ad]:
 
 # ── Detail-page enrichment ────────────────────────────────────────────────────
 def enrich_ad(ad: Ad) -> Optional[Ad]:
-    log.info("  Enriching: %.60s", ad.title)
+    """Fetch detail page, apply broker filter, extract market price. Thread-safe."""
+    with _log_lock:
+        log.info("  Enriching: %.65s", ad.title)
+
     html = flare_get(ad.ad_url)
     if not html:
         return None
 
     soup = BeautifulSoup(html, "lxml")
 
-    # Seller count
+    # Broker filter
     count = _extract_seller_count(soup)
     ad.seller_ad_count = count
     if count > MAX_SELLER_ADS:
-        log.info("  SKIP broker (%d ads): %.60s", count, ad.title)
+        with _log_lock:
+            log.info("  SKIP broker (%d ads): %.55s", count, ad.title)
         return None
 
     # Seller name
@@ -377,7 +397,7 @@ def enrich_ad(ad: Ad) -> Optional[Ad]:
     )
     ad.seller_name = name_el.get_text(strip=True) if name_el else ""
 
-    # Price (detail page is more reliable)
+    # Price
     if not ad.price:
         price_el = (
             soup.select_one("span.b-advert-price__converted")
@@ -412,11 +432,11 @@ def enrich_ad(ad: Ad) -> Optional[Ad]:
     if market_text:
         ad.market_price_low, ad.market_price_high = parse_market_range(market_text)
         if ad.market_price_low:
-            log.info(
-                "  Market: USh %s ~ %s",
-                f"{ad.market_price_low:,}",
-                f"{ad.market_price_high:,}" if ad.market_price_high else "?",
-            )
+            with _log_lock:
+                log.info("  Market: USh %s ~ %s | %.45s",
+                         f"{ad.market_price_low:,}",
+                         f"{ad.market_price_high:,}" if ad.market_price_high else "?",
+                         ad.title)
 
     # Better image
     if not ad.image_url:
@@ -439,16 +459,12 @@ def enrich_ad(ad: Ad) -> Optional[Ad]:
 
 def _extract_seller_count(soup: BeautifulSoup) -> int:
     for a in soup.select("a"):
-        m = re.search(
-            r"(?:all\s+ads?|see\s+all)\s*\((\d+)\)",
-            a.get_text(strip=True), re.I,
-        )
+        m = re.search(r"(?:all\s+ads?|see\s+all)\s*\((\d+)\)",
+                      a.get_text(strip=True), re.I)
         if m:
             return int(m.group(1))
-    for sel in (
-        "div.b-seller-block", "div.b-user-info",
-        "div.b-advert-contact", "div.seller-info",
-    ):
+    for sel in ("div.b-seller-block", "div.b-user-info",
+                "div.b-advert-contact", "div.seller-info"):
         for el in soup.select(sel):
             m = re.search(r"(\d+)\s+[Aa]ds?", el.get_text(" ", strip=True))
             if m:
@@ -465,6 +481,30 @@ def _extract_seller_count(soup: BeautifulSoup) -> int:
     return 1
 
 
+# ── Concurrent enrichment ─────────────────────────────────────────────────────
+def enrich_all_concurrent(ads: list[Ad]) -> list[Ad]:
+    """Enrich ads in parallel using ENRICH_WORKERS threads."""
+    results: list[Ad] = []
+    total = len(ads)
+    completed = 0
+
+    with ThreadPoolExecutor(max_workers=ENRICH_WORKERS) as executor:
+        futures = {executor.submit(enrich_ad, ad): ad for ad in ads}
+        for future in as_completed(futures):
+            completed += 1
+            try:
+                result = future.result()
+                if result:
+                    results.append(result)
+            except Exception as exc:
+                log.error("Enrich worker error: %s", exc)
+            if completed % 10 == 0 or completed == total:
+                log.info("  Progress: %d/%d enriched, %d kept so far",
+                         completed, total, len(results))
+
+    return results
+
+
 # ── Database ──────────────────────────────────────────────────────────────────
 def get_supabase() -> Client:
     return create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -476,9 +516,7 @@ def upsert_ads(supabase: Client, ads: list[Ad]) -> tuple[int, int]:
         try:
             existing = (
                 supabase.table("jiji_deals")
-                .select("id")
-                .eq("ad_url", ad.ad_url)
-                .execute()
+                .select("id").eq("ad_url", ad.ad_url).execute()
             )
             if existing.data:
                 skipped += 1
@@ -535,14 +573,15 @@ def send_telegram_alert(ad: Ad) -> None:
             if not result.get("ok"):
                 log.error("Telegram error: %s", result)
             else:
-                log.info("Telegram alert sent: %.60s", ad.title)
+                log.info("Telegram alert: %.60s", ad.title)
     except Exception as exc:
-        log.error("Telegram request failed: %s", exc)
+        log.error("Telegram failed: %s", exc)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main() -> None:
-    # Wait for FlareSolverr service to be ready
+    t_start = time.time()
+
     if not wait_for_flaresolverr(max_wait=60):
         raise RuntimeError("FlareSolverr did not start in time")
 
@@ -552,32 +591,32 @@ def main() -> None:
     # ── 1. Scrape search pages ────────────────────────────────────────────────
     for item in SEARCH_QUERIES:
         q_enc = urllib.parse.quote(item["query"])
-        for pnum in range(1, MAX_PAGES + 1):
+        for pnum in range(1, MAX_SEARCH_PAGES + 1):
             target = (
                 f"{item['base_url']}?query={q_enc}"
                 if pnum == 1
                 else f"{item['base_url']}?query={q_enc}&page={pnum}"
             )
-            log.info("Fetching '%s' page %d → %s", item["query"], pnum, target)
+            log.info("Fetching '%s' page %d", item["query"], pnum)
             html = flare_get(target)
 
             if not html:
-                log.warning("No HTML — skipping '%s' page %d", item["query"], pnum)
+                log.warning("No HTML — skipping '%s' p%d", item["query"], pnum)
                 break
 
             batch = parse_search_html(html, item["category"], item["query"])
             log.info("  → %d candidates", len(batch))
 
             if not batch:
-                log.info("  Empty — stopping pagination for '%s'", item["query"])
                 break
 
             candidates.extend(batch)
-            time.sleep(DELAY_BETWEEN)
+            if pnum < MAX_SEARCH_PAGES:
+                time.sleep(PAGE_DELAY)
 
     log.info("Total candidates: %d", len(candidates))
 
-    # ── 2. Filter known URLs ──────────────────────────────────────────────────
+    # ── 2. Filter already-stored URLs ─────────────────────────────────────────
     try:
         rows = supabase.table("jiji_deals").select("ad_url").execute()
         existing_urls = {r["ad_url"] for r in rows.data}
@@ -585,21 +624,17 @@ def main() -> None:
         log.warning("Could not fetch existing URLs: %s", exc)
         existing_urls = set()
 
-    seen_this_run: set[str] = set()
+    seen: set[str] = set()
     new_ads: list[Ad] = []
     for a in candidates:
-        if a.ad_url not in existing_urls and a.ad_url not in seen_this_run:
-            seen_this_run.add(a.ad_url)
+        if a.ad_url not in existing_urls and a.ad_url not in seen:
+            seen.add(a.ad_url)
             new_ads.append(a)
     log.info("New (not in DB): %d", len(new_ads))
 
-    # ── 3. Enrich + broker filter ─────────────────────────────────────────────
-    enriched: list[Ad] = []
-    for ad in new_ads:
-        result = enrich_ad(ad)
-        if result:
-            enriched.append(result)
-        time.sleep(2)
+    # ── 3. Concurrent enrichment + broker filter ──────────────────────────────
+    log.info("Enriching %d ads with %d workers...", len(new_ads), ENRICH_WORKERS)
+    enriched = enrich_all_concurrent(new_ads)
 
     log.info(
         "After broker filter (≤%d ads): kept %d / %d",
@@ -615,6 +650,14 @@ def main() -> None:
     log.info("Deals this run: %d", len(deals))
     for ad in deals:
         send_telegram_alert(ad)
+
+    # ── Cleanup FlareSolverr session ──────────────────────────────────────────
+    global _fs_session_id
+    if _fs_session_id:
+        _fs_destroy_session(_fs_session_id)
+
+    elapsed = round(time.time() - t_start)
+    log.info("Done in %dm %ds", elapsed // 60, elapsed % 60)
 
 
 if __name__ == "__main__":
