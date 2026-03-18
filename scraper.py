@@ -150,20 +150,36 @@ def parse_ugx(raw: str) -> Optional[int]:
 
 
 def extract_price_from_stub(raw: str) -> Optional[int]:
-    """Pull price from messy anchor text like '5+ years on JijiUSh 38,000,000Toyota Harrier'"""
-    m = re.search(r"US[Hh]\s*([\d,]+(?:\.\d+)?)\s*(M\b)?", raw, re.I)
-    if not m:
-        return None
-    val_str = m.group(1).replace(",", "")
-    try:
-        val = float(val_str)
-        if m.group(2):
-            return int(val * 1_000_000)
-        if val < 10_000:
-            return int(val * 1_000_000)
-        return int(val)
-    except ValueError:
-        return None
+    """
+    Extract the LISTING price from link-scan anchor text.
+    Skips any USh value that is part of a market range (has ~ nearby).
+
+    Examples:
+      "5+ years on JijiUSh 38,000,000Toyota Harrier" → 38_000_000
+      "USh 47.5 M ~ 48 MSubaru Forester 2014"        → None (range only)
+      "USh 23,500,000Market price: USh 17 M ~ 19 M"  → 23_500_000
+    """
+    for m in re.finditer(r"US[Hh]\s*([\d,]+(?:\.[\d]+)?)\s*(M\b)?", raw, re.I):
+        # Skip if ~ is within 15 chars after this value (low end of range)
+        after = raw[m.end():m.end()+15]
+        if re.search(r"[~\u007e\uff5e]", after):
+            continue
+        # Skip if ~ is within 15 chars before this value (high end of range)
+        before = raw[max(0, m.start()-15):m.start()]
+        if re.search(r"[~\u007e\uff5e]", before):
+            continue
+        val_str = m.group(1).replace(",", "")
+        try:
+            val = float(val_str)
+            if m.group(2):
+                return int(val * 1_000_000)
+            if val < 10_000:
+                return int(val * 1_000_000)
+            v = int(val)
+            return v if v > 100_000 else None
+        except ValueError:
+            pass
+    return None
 
 
 def parse_market_range(text: str) -> tuple[Optional[int], Optional[int]]:
