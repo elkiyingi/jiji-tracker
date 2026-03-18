@@ -10,10 +10,10 @@ import time
 import logging
 import urllib.request
 import urllib.parse
-import threading
 from dataclasses import dataclass, field
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 from bs4 import BeautifulSoup
 from supabase import create_client, Client
@@ -33,22 +33,21 @@ TELEGRAM_CHAT_ID: str = os.environ.get("TELEGRAM_CHAT_ID", "")
 FLARESOLVERR_URL      = os.environ.get("FLARESOLVERR_URL", "http://localhost:8191/v1")
 
 # ── Deal / filter parameters ──────────────────────────────────────────────────
-MIN_PRICE          = 15_000_000   # ignore anything cheaper
-MAX_PRICE          = 80_000_000   # ignore anything more expensive
-DEAL_THRESHOLD     = 0.10         # price must be ≥ 10% below Jiji market floor
-BROKER_MIN_ADS     = 3            # seller flagged as broker if they have ≥ this
-                                  # many ads already stored in our DB
+MIN_PRICE          = 15_000_000   
+MAX_PRICE          = 80_000_000   
+DEAL_THRESHOLD     = 0.10         
+BROKER_MIN_ADS     = 3            
 
 # ── Scraper parameters ────────────────────────────────────────────────────────
-MAX_TIMEOUT        = 60_000       # ms per FlareSolverr request
-MAX_SEARCH_PAGES   = 5            # INCREASED to 5 pages of /cars to fetch per run
-ENRICH_WORKERS     = 3            # parallel detail-page fetches
+MAX_TIMEOUT        = 60_000       
+MAX_SEARCH_PAGES   = 5            
+ENRICH_WORKERS     = 3            
 RETRY_ATTEMPTS     = 2
-PAGE_DELAY         = 2            # seconds between search pages
+PAGE_DELAY         = 2            
 
 SEARCH_QUERIES = [
     {
-        "query":    "",            # empty = browse all cars, no model filter
+        "query":    "",            
         "category": "cars",
         "base_url": "https://jiji.ug/cars",
     },
@@ -228,10 +227,6 @@ def is_broker(seller_name: str, broker_set: set[str]) -> bool:
 
 
 # ── FlareSolverr ──────────────────────────────────────────────────────────────
-_fs_session_id: Optional[str] = None
-_fs_session_lock = threading.Lock()
-
-
 def _fs_create_session() -> Optional[str]:
     payload = json.dumps({"cmd": "sessions.create"}).encode()
     try:
@@ -243,7 +238,6 @@ def _fs_create_session() -> Optional[str]:
             data = json.loads(resp.read())
             if data.get("status") == "ok":
                 sid = data.get("session")
-                log.info("FlareSolverr session: %s", sid)
                 return sid
     except Exception as exc:
         log.warning("Could not create FS session: %s", exc)
@@ -257,69 +251,74 @@ def _fs_destroy_session(sid: str) -> None:
             FLARESOLVERR_URL, data=payload,
             headers={"Content-Type": "application/json"}, method="POST",
         )
-        urllib.request.urlopen(req, timeout=10)
+        urllib.request.urlopen(req, timeout=5)
     except Exception:
         pass
 
 
 def flare_get(target_url: str) -> Optional[str]:
-    global _fs_session_id
-    with _fs_session_lock:
-        if _fs_session_id is None:
-            _fs_session_id = _fs_create_session()
+    """
+    Creates a dedicated session for this request so highly concurrent requests
+    do not clobber the same Chromium tab and leak data between threads.
+    """
+    sid = _fs_create_session()
+    if not sid:
+        log.warning("  FS: Could not acquire isolated session for %s", target_url)
+        return None
 
-    body: dict = {
-        "cmd": "request.get",
-        "url": target_url,
-        "maxTimeout": MAX_TIMEOUT,
-    }
-    if _fs_session_id:
-        body["session"] = _fs_session_id
-    if "/cars/" in target_url or "/land-plots-for-sale/" in target_url:
-        body["waitForSelector"] = '[itemprop="price"]'  
+    try:
+        body: dict = {
+            "cmd": "request.get",
+            "url": target_url,
+            "maxTimeout": MAX_TIMEOUT,
+            "session": sid
+        }
+        if "/cars/" in target_url or "/land-plots-for-sale/" in target_url:
+            body["waitForSelector"] = '[itemprop="price"]'  
 
-    payload = json.dumps(body).encode()
+        payload = json.dumps(body).encode()
 
-    for attempt in range(1, RETRY_ATTEMPTS + 1):
-        try:
-            req = urllib.request.Request(
-                FLARESOLVERR_URL, data=payload,
-                headers={"Content-Type": "application/json"}, method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=MAX_TIMEOUT // 1000 + 15) as resp:
-                data = json.loads(resp.read())
+        for attempt in range(1, RETRY_ATTEMPTS + 1):
+            try:
+                req = urllib.request.Request(
+                    FLARESOLVERR_URL, data=payload,
+                    headers={"Content-Type": "application/json"}, method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=MAX_TIMEOUT // 1000 + 15) as resp:
+                    data = json.loads(resp.read())
 
-            status   = data.get("status", "")
-            solution = data.get("solution", {})
-            html     = solution.get("response", "")
-            http_st  = solution.get("status", 0)
+                status   = data.get("status", "")
+                solution = data.get("solution", {})
+                html     = solution.get("response", "")
+                http_st  = solution.get("status", 0)
 
-            with _log_lock:
-                log.info("  FS: %s HTTP=%s %d bytes %.55s",
-                         status, http_st, len(html), target_url)
+                with _log_lock:
+                    log.info("  FS: %s HTTP=%s %d bytes %.55s",
+                             status, http_st, len(html), target_url)
 
-            if status != "ok":
-                log.warning("  FS error: %s", data.get("message", ""))
+                if status != "ok":
+                    log.warning("  FS error: %s", data.get("message", ""))
+                    if attempt < RETRY_ATTEMPTS:
+                        time.sleep(5)
+                    continue
+
+                if "Just a moment" in html or "Performing security verification" in html:
+                    log.warning("  CF not solved (attempt %d/%d)", attempt, RETRY_ATTEMPTS)
+                    if attempt < RETRY_ATTEMPTS:
+                        time.sleep(8)
+                    continue
+
+                return html
+
+            except Exception as exc:
+                log.error("  FS error (attempt %d): %s", attempt, exc)
                 if attempt < RETRY_ATTEMPTS:
                     time.sleep(5)
-                continue
 
-            if "Just a moment" in html or "Performing security verification" in html:
-                log.warning("  CF not solved (attempt %d/%d)", attempt, RETRY_ATTEMPTS)
-                with _fs_session_lock:
-                    _fs_session_id = None
-                if attempt < RETRY_ATTEMPTS:
-                    time.sleep(10)
-                continue
-
-            return html
-
-        except Exception as exc:
-            log.error("  FS error (attempt %d): %s", attempt, exc)
-            if attempt < RETRY_ATTEMPTS:
-                time.sleep(5)
-
-    return None
+        return None
+    finally:
+        # Guarantee session deletion to prevent Chromium tab exhaustion
+        _fs_destroy_session(sid)
 
 
 def wait_for_flaresolverr(max_wait: int = 60) -> bool:
@@ -705,7 +704,6 @@ def main() -> None:
     broker_set = build_broker_set(supabase)
 
     try:
-        # Added .limit(3000).order("created_at", desc=True) to fix the 1000-row PostgREST limit issue
         existing_urls = {r["ad_url"] for r in
                          supabase.table("jiji_deals").select("ad_url").order("created_at", desc=True).limit(3000).execute().data}
     except Exception as exc:
@@ -768,11 +766,6 @@ def main() -> None:
     log.info("Deals this run: %d", len(deals))
     for ad in deals:
         send_telegram_alert(ad)
-
-    # Cleanup
-    global _fs_session_id
-    if _fs_session_id:
-        _fs_destroy_session(_fs_session_id)
 
     elapsed = round(time.time() - t_start)
     log.info("Done in %dm %ds", elapsed // 60, elapsed % 60)
