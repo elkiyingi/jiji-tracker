@@ -338,6 +338,10 @@ def flare_get(target_url: str) -> Optional[str]:
     }
     if _fs_session_id:
         body["session"] = _fs_session_id
+    # For detail pages: wait for the price element to render
+    # (market price is JS-rendered, needs a moment after page load)
+    if "/cars/" in target_url or "/land-plots-for-sale/" in target_url:
+        body["waitForSelector"] = '[itemprop="price"]'  # always present on listing pages
 
     payload = json.dumps(body).encode()
 
@@ -549,11 +553,12 @@ def enrich_ad(ad: Ad, broker_set: set[str]) -> Optional[Ad]:
     soup = BeautifulSoup(html, "lxml")
 
     # ── Seller name ───────────────────────────────────────────────────────────
+    # b-seller-block__name is confirmed from actual Jiji HTML source
     name_el = (
         soup.select_one("div.b-seller-block__name")
+        or soup.select_one("div.b-seller-block__info div.b-seller-block__name")
         or soup.select_one("span.b-advert-contact__name")
         or soup.select_one("div.b-user-info__name")
-        or soup.select_one("[class*='seller'] [class*='name']")
     )
     ad.seller_name = name_el.get_text(strip=True) if name_el else ""
 
@@ -565,36 +570,47 @@ def enrich_ad(ad: Ad, broker_set: set[str]) -> Optional[Ad]:
         return None
 
     # ── Confirmed price from detail page (always overwrites stub price) ─────
-    # Be specific: target the main price element, NOT the market range element.
-    # Jiji's main price is in a dedicated heading/span, not near "Market price:"
+    # Primary: itemprop="price" content="78000000" — a machine-readable integer
+    # always present in the HTML, immune to JS rendering timing issues.
     confirmed = None
-    for sel in [
-        "span.b-advert-price__converted",
-        "h3.b-advert-price",
-        "div.b-advert-price > span",
-        "span[class*='price-value']",
-        "h2[class*='price']",
-    ]:
-        el = soup.select_one(sel)
-        if el:
-            v = parse_ugx(el.get_text(strip=True))
-            if v and v > 100_000:
-                confirmed = v
-                break
 
-    # Fallback: find the first USh value that is NOT part of a market range
-    if not confirmed:
-        for tag in soup.find_all(string=lambda t: t and "USh" in t or "UGX" in t):
-            txt = str(tag)
-            if "market" in txt.lower() or "~" in txt:
-                continue
-            v = parse_ugx(txt)
-            if v and v > 100_000:
+    price_el = soup.select_one('[itemprop="price"][content]')
+    if price_el:
+        try:
+            v = int(float(price_el["content"]))
+            if v > 100_000:
                 confirmed = v
-                break
+        except (ValueError, TypeError):
+            pass
+
+    # Fallback 1: Open Graph product price meta tag (also in <head>, always reliable)
+    if not confirmed:
+        meta = soup.find("meta", attrs={"property": "product:price:amount"})
+        if meta and meta.get("content"):
+            try:
+                v = int(float(meta["content"]))
+                if v > 100_000:
+                    confirmed = v
+            except (ValueError, TypeError):
+                pass
+
+    # Fallback 2: text-based selectors for JS-rendered price
+    if not confirmed:
+        for sel in [
+            "span.qa-advert-price-view-value",
+            "div.b-alt-advert-price__text",
+            "span.b-advert-price__converted",
+            "div.b-advert-price",
+        ]:
+            el = soup.select_one(sel)
+            if el:
+                v = parse_ugx(el.get_text(strip=True))
+                if v and v > 100_000:
+                    confirmed = v
+                    break
 
     if confirmed:
-        ad.price = confirmed  # always trust the detail page over the stub
+        ad.price = confirmed  # always trust detail page over stub
 
     # Hard price filter on confirmed price
     if not _in_price_range(ad.price):
