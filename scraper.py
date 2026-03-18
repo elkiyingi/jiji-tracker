@@ -35,7 +35,7 @@ FLARESOLVERR_URL      = os.environ.get("FLARESOLVERR_URL", "http://localhost:819
 # ── Deal / filter parameters ──────────────────────────────────────────────────
 MIN_PRICE          = 15_000_000   
 MAX_PRICE          = 80_000_000   
-DEAL_THRESHOLD     = 0.10         
+DEAL_THRESHOLD     = 0.00         
 BROKER_MIN_ADS     = 3            
 
 # ── Scraper parameters ────────────────────────────────────────────────────────
@@ -755,14 +755,27 @@ def main() -> None:
     # ── 3. Enrich concurrently ────────────────────────────────────────────────
     log.info("Enriching %d ads (%d workers)...", len(new_ads), ENRICH_WORKERS)
     enriched = enrich_all_concurrent(new_ads, broker_set)
-    log.info("After all filters: kept %d / %d", len(enriched), len(new_ads))
+    
+    # In-memory broker trap for sellers with >= BROKER_MIN_ADS this run
+    from collections import Counter
+    run_counts = Counter(a.seller_name.strip().lower() for a in enriched if a.seller_name.strip())
+    
+    final_ads = []
+    for ad in enriched:
+        name_lower = ad.seller_name.strip().lower()
+        if name_lower and run_counts[name_lower] >= BROKER_MIN_ADS:
+            log.info("  SKIP broker (in-memory heuristic, %d ads this run): %s", run_counts[name_lower], ad.seller_name)
+            continue
+        final_ads.append(ad)
+
+    log.info("After all filters: kept %d / %d", len(final_ads), len(new_ads))
 
     # ── 4. Persist ────────────────────────────────────────────────────────────
-    inserted, skipped = upsert_ads(supabase, enriched)
+    inserted, skipped = upsert_ads(supabase, final_ads)
     log.info("DB — inserted: %d, skipped: %d", inserted, skipped)
 
     # ── 5. Alerts ─────────────────────────────────────────────────────────────
-    deals = [a for a in enriched if a.is_deal]
+    deals = [a for a in final_ads if a.is_deal]
     log.info("Deals this run: %d", len(deals))
     for ad in deals:
         send_telegram_alert(ad)

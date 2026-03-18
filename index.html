@@ -115,10 +115,9 @@
   </div>
 
   <!-- TABS -->
-  <div class="flex items-center gap-2 mb-4 flex-wrap">
-    <button class="tab-btn active" onclick="setTab('all')"       id="tab-all">All Listings</button>
-    <button class="tab-btn"        onclick="setTab('deals')"     id="tab-deals">🔥 Deals</button>
-    <button class="tab-btn"        onclick="setTab('watchlist')" id="tab-watchlist">📌 Watchlist</button>
+  <div class="flex items-center gap-4 mb-6 sticky top-[68px] glass z-20 py-2" id="tabs-container">
+    <button class="px-3 py-1.5 rounded-md font-medium text-sm focus:outline-none transition-colors" data-tab="all" style="background:var(--accent);color:white;">🔥 Deals Feed</button>
+    <button class="px-3 py-1.5 rounded-md font-medium text-sm text-gray-400 hover:text-white transition-colors focus:outline-none" data-tab="watchlist">📌 Watchlist</button>
   </div>
 
   <!-- FILTERS PANEL -->
@@ -273,6 +272,7 @@ async function fetchAds() {
   url.searchParams.set("order", "created_at.desc");
   url.searchParams.set("limit", "500");
   url.searchParams.set("is_archived", "eq.false");
+  url.searchParams.set("is_deal", "eq.true"); // NEW: force deals only
   const res = await fetch(url.toString(), {
     headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
   });
@@ -505,15 +505,18 @@ function applyFilters() {
   const q      = document.getElementById("search-input").value.toLowerCase().trim();
   const cat    = document.getElementById("cat-filter").value;
   const sort   = document.getElementById("sort-select").value;
-  const pinned = getPinned();
+  const pinned = getPinned(); // Renamed from 'watchlist' to 'pinned' for consistency
 
   let list = allAds.filter(ad => {
-    const title = cleanTitle(ad.title).toLowerCase();
+    const rawTitle = ad.title.toLowerCase();
+    const cleanT = cleanTitle(ad.title).toLowerCase(); 
     if (cat !== "all" && ad.category !== cat) return false;
-    if (q && !title.includes(q)) return false;
-    if (activeModel && !title.includes(activeModel.toLowerCase())) return false;
-    if (activeTab === "deals"     && !ad.is_deal)       return false;
-    if (activeTab === "watchlist" && !pinned.has(ad.id)) return false;
+    if (q && !rawTitle.includes(q)) return false;
+    if (activeModel && !cleanT.includes(activeModel.toLowerCase())) return false; 
+
+    let isPinned = pinned.has(ad.id); 
+    if (activeTab === 'watchlist' && !isPinned) return false;
+
     // Price range filter
     if (ad.price != null) {
       if (ad.price < priceMin || ad.price > priceMax) return false;
@@ -602,7 +605,7 @@ function saveNote(id, text) {
 </script>
 
 <!-- COMPREHENSIVE MODEL FILTER MODAL -->
-<div id="model-modal" class="hidden" onclick="if(event.target===this)closeModal();" style="position:fixed;inset:0;z-index:100;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.7);backdrop-filter:blur(4px);">
+<div id="model-modal" class="hidden" onclick="if(event.target===this)closeModal();" style="position:fixed;inset:0;z-index:100;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.7);backdrop-filter:blur(4px);">
   <div style="background:var(--surf);border:1px solid var(--border2);border-radius:20px;width:min(680px,95vw);max-height:80vh;overflow:hidden;display:flex;flex-direction:column;">
     <div style="padding:1.25rem 1.5rem;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;">
       <h2 style="font-family:'Cabinet Grotesk',sans-serif;font-weight:800;font-size:1.1rem;color:var(--text);">All Models</h2>
