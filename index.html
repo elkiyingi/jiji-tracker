@@ -4,6 +4,14 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Jiji Deal Tracker — Uganda</title>
+  <link rel="manifest" href="manifest.json" />
+  <meta name="theme-color" content="#0c0d0f" />
+  <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⚡</text></svg>">
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('sw.js').catch(console.error);
+    }
+  </script>
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -108,10 +116,8 @@
 <div class="max-w-7xl mx-auto px-4 sm:px-6 py-5">
 
   <!-- STATS -->
-  <div id="stats-row" class="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-5">
+  <div id="stats-row" class="grid grid-cols-2 sm:grid-cols-2 gap-3 mb-5">
     <div class="skeleton h-16"></div><div class="skeleton h-16"></div>
-    <div class="skeleton h-16"></div><div class="skeleton h-16"></div>
-    <div class="skeleton h-16"></div>
   </div>
 
   <!-- TABS -->
@@ -247,8 +253,10 @@ const ALL_MODELS = [
 // [label, min, max]  —  null means no limit
 const PRESETS = [
   ["All",       15_000_000, 80_000_000],
-  ["Under 30M", 15_000_000, 30_000_000],
-  ["30 – 50M",  30_000_000, 50_000_000],
+  ["Under 20M", 15_000_000, 20_000_000],
+  ["20 – 30M",  20_000_000, 30_000_000],
+  ["30 – 40M",  30_000_000, 40_000_000],
+  ["40 – 50M",  40_000_000, 50_000_000],
   ["50 – 65M",  50_000_000, 65_000_000],
   ["65 – 80M",  65_000_000, 80_000_000],
 ];
@@ -351,7 +359,6 @@ function buildCard(ad, idx) {
   const title  = cleanTitle(ad.title);
   const catIcon = ad.category === "cars" ? "🚗" : "🌿";
 
-  const dealBadge = ad.is_deal ? `<span class="deal-badge">🔥 Deal</span>` : "";
   // Only show pill if meaningfully below (>=5%) or above market
   const discPill = (() => {
     if (pct == null) return "";
@@ -368,16 +375,12 @@ function buildCard(ad, idx) {
     : `<div style="display:flex;align-items:center;justify-content:center;height:100%;font-size:2.5rem;color:var(--muted);">${catIcon}</div>`;
 
   return `
-    <article class="ad-card group ${pinned?'pinned-card':''} ${ad.is_deal?'deal-card':''}"
+    <article class="ad-card group ${pinned?'pinned-card':''} deal-card"
              style="animation-delay:${idx*30}ms" data-id="${ad.id}">
       <div class="relative overflow-hidden" style="height:155px;background:var(--bg);">
         ${img}
-        <div class="absolute top-2 left-2 flex gap-1.5 flex-wrap">
-          <span class="font-mono text-xs px-2 py-0.5 rounded-full" style="background:rgba(0,0,0,.6);color:var(--subtle);">${ad.category}</span>
-          ${dealBadge}
-        </div>
         <button class="pin-btn absolute top-2 right-2 ${pinned?'pinned':''}"
-                onclick="togglePin(${ad.id},this)">${pinned?'📌':'🔖'}</button>
+                onclick="togglePin('${ad.id}',this)">${pinned?'📌':'🔖'}</button>
       </div>
       <div class="p-3.5">
         <h3 class="font-display font-bold text-sm leading-snug line-clamp-2 mb-2" style="color:var(--text);">${esc(title)}</h3>
@@ -394,7 +397,7 @@ function buildCard(ad, idx) {
           ${ad.seller_ad_count > 0 ? `<div class="flex items-center gap-1.5 font-mono text-xs" style="color:var(--muted);"><span>👁️</span><span class="truncate">${ad.seller_ad_count} ads</span></div>` : ""}
           ${ad.deal_reason ? `<div class="font-mono text-xs truncate" style="color:var(--accent);" title="${esc(ad.deal_reason)}">📌 ${esc(ad.deal_reason)}</div>` : ""}
         </div>
-        ${pinned ? `<div class="mt-2.5"><textarea class="note-area" rows="2" placeholder="Add a note…" onchange="saveNote(${ad.id},this.value)">${esc(note)}</textarea></div>` : ""}
+        ${pinned ? `<div class="mt-2.5"><textarea class="note-area" rows="2" placeholder="Add a note…" onchange="saveNote('${ad.id}',this.value)">${esc(note)}</textarea></div>` : ""}
         <div class="flex items-center justify-between mt-3 pt-3" style="border-top:1px solid var(--border);">
           <span class="font-mono text-xs" style="color:var(--muted);">${timeAgo(ad.created_at)}</span>
           <a href="${esc(ad.ad_url)}" target="_blank" rel="noopener noreferrer"
@@ -413,11 +416,8 @@ function buildCard(ad, idx) {
 function renderStats(ads) {
   const pinned = getPinned();
   const s = [
-    { l:"Total",     v:ads.length,                         i:"📋" },
-    { l:"Cars",      v:ads.filter(a=>a.category==="cars").length, i:"🚗" },
-    { l:"Land",      v:ads.filter(a=>a.category==="land").length, i:"🌿" },
-    { l:"Deals",     v:ads.filter(a=>a.is_deal).length,    i:"🔥" },
-    { l:"Watchlist", v:pinned.size,                        i:"📌" },
+    { l:"Total Deals", v:ads.length, i:"🔥" },
+    { l:"Watchlist",   v:pinned.size, i:"📌" },
   ];
   document.getElementById("stats-row").innerHTML = s.map((x,i) => `
     <div class="stat-card" style="animation:riseIn .3s ease ${i*50}ms both;">

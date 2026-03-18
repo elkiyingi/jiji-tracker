@@ -10,6 +10,7 @@ import time
 import logging
 import urllib.request
 import urllib.parse
+from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -692,6 +693,15 @@ def send_telegram_alert(ad: Ad) -> None:
         log.error("Telegram failed: %s", exc)
 
 
+def cleanup_old_ads(supabase: Client, days: int = 30) -> None:
+    try:
+        cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+        res = supabase.table("jiji_deals").delete().lt("created_at", cutoff).execute()
+        count = len(res.data) if getattr(res, "data", None) else 0
+        log.info("DB Cleanup: Deleted %d ads older than %d days", count, days)
+    except Exception as exc:
+        log.error("DB Cleanup error: %s", exc)
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main() -> None:
     t_start = time.time()
@@ -779,6 +789,10 @@ def main() -> None:
     log.info("Deals this run: %d", len(deals))
     for ad in deals:
         send_telegram_alert(ad)
+
+    # ── 6. DB Auto-Cleanup ────────────────────────────────────────────────────
+    log.info("Running DB auto-cleanup...")
+    cleanup_old_ads(supabase, days=30)
 
     elapsed = round(time.time() - t_start)
     log.info("Done in %dm %ds", elapsed // 60, elapsed % 60)
