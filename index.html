@@ -195,8 +195,8 @@
 
 <script>
 // ── CONFIG ────────────────────────────────────────────────────────────────────
-const SUPABASE_URL      = "https://kqcajivcxtpollgllgvp.supabase.co";
-const SUPABASE_ANON_KEY = "sb_publishable_Zdeve0bloaunxKObUfoing_XXsQlOhL";
+const SUPABASE_URL      = "https://YOUR_PROJECT_ID.supabase.co";
+const SUPABASE_ANON_KEY = "YOUR_SUPABASE_ANON_KEY";
 const TABLE = "jiji_deals";
 const PIN_KEY  = "jiji_pinned_ids";
 const NOTE_KEY = "jiji_notes";
@@ -324,9 +324,14 @@ function buildCard(ad, idx) {
   const catIcon = ad.category === "cars" ? "🚗" : "🌿";
 
   const dealBadge = ad.is_deal ? `<span class="deal-badge">🔥 Deal</span>` : "";
-  const discPill  = pct != null
-    ? `<span class="disc ${pct >= 0 ? 'disc-below' : 'disc-above'}">${pct >= 0 ? `${pct}% below mkt` : `${Math.abs(pct)}% above mkt`}</span>`
-    : "";
+  // Only show pill if meaningfully below (>=5%) or above market
+  const discPill = (() => {
+    if (pct == null) return "";
+    if (pct >= 10) return `<span class="disc disc-below">🔥 ${pct}% below mkt</span>`;
+    if (pct >= 5)  return `<span class="disc disc-below">${pct}% below mkt</span>`;
+    if (pct >= 0)  return `<span class="disc" style="background:rgba(100,100,100,.1);color:var(--muted);">~mkt price</span>`;
+    return `<span class="disc disc-above">${Math.abs(pct)}% above mkt</span>`;
+  })();
 
   const img = ad.image_url
     ? `<img src="${esc(ad.image_url)}" alt="" loading="lazy"

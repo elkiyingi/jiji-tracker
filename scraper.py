@@ -237,10 +237,31 @@ def build_broker_set(supabase: Client) -> set[str]:
         return set()
 
 
+# Keywords that strongly indicate a commercial dealer rather than a private seller
+BROKER_KEYWORDS = {
+    "motors", "auto", "limited", "ltd", "company", "co.", "enterprise",
+    "trading", "dealers", "garage", "imports", "sales", "cars", "vehicles",
+    "automotive", "ug", "uganda", "centre", "center",
+}
+
 def is_broker(seller_name: str, broker_set: set[str]) -> bool:
+    """
+    Two-layer broker check:
+    1. DB heuristic — seller already has ≥ BROKER_MIN_ADS in our DB
+    2. Keyword heuristic — seller name contains commercial dealer keywords
+       (catches new brokers on their first appearance)
+    """
     if not seller_name:
         return False
-    return seller_name.strip().lower() in broker_set
+    name_lower = seller_name.strip().lower()
+    # DB heuristic
+    if name_lower in broker_set:
+        return True
+    # Keyword heuristic — any word in the name matches a broker keyword
+    name_words = set(re.split(r"[\s\-_&/]+", name_lower))
+    if name_words & BROKER_KEYWORDS:
+        return True
+    return False
 
 
 # ── FlareSolverr ──────────────────────────────────────────────────────────────
