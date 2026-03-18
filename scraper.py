@@ -167,23 +167,32 @@ def extract_price_from_stub(raw: str) -> Optional[int]:
 
 
 def parse_market_range(text: str) -> tuple[Optional[int], Optional[int]]:
+    """
+    Parse Jiji market price strings in all observed formats:
+      "Market price: USh 56.36 M ~ 57.1 M"   <- space before M
+      "Market price: USh 74.5 M ~ 79.2 M"
+      "Market price: USh 74,500,000 ~ 79,200,000"
+      "USh 37,550,000 ~ 40,600,000"
+    """
     if not text:
         return None, None
-    t = text.upper().replace(",", "").replace("\xa0", "").replace(" ", "")
-    parts = re.split(r"[~\-–—]", t)
-    if len(parts) < 2:
-        return None, None
-
-    def _ex(s: str) -> Optional[int]:
-        m = re.search(r"([\d.]+)M", s)
-        if m:
-            return int(float(m.group(1)) * 1_000_000)
-        m = re.search(r"(\d{5,})", s)
-        if m:
-            return int(m.group(1))
-        return None
-
-    return _ex(parts[0]), _ex(parts[1])
+    # Normalise: strip commas and non-breaking spaces
+    t = text.replace(",", "").replace("\xa0", "").strip()
+    # Primary: two values each followed by M (with optional space before M)
+    m = re.search(
+        r"([\d]+(?:\.[\d]+)?)\s*M[\s~\-\u2013\u2014]+([\d]+(?:\.[\d]+)?)\s*M",
+        t, re.I,
+    )
+    if m:
+        return (
+            int(float(m.group(1)) * 1_000_000),
+            int(float(m.group(2)) * 1_000_000),
+        )
+    # Fallback: two large integers (>=6 digits) separated by ~ or dash
+    m2 = re.search(r"(\d{6,})\s*[~\-\u2013\u2014]\s*(\d{6,})", t)
+    if m2:
+        return int(m2.group(1)), int(m2.group(2))
+    return None, None
 
 
 def clean_stub_title(raw: str) -> str:
@@ -555,6 +564,12 @@ def enrich_ad(ad: Ad, broker_set: set[str]) -> Optional[Ad]:
                          f"{ad.market_price_low:,}",
                          f"{ad.market_price_high:,}" if ad.market_price_high else "?",
                          ad.title)
+
+    # ── Require market price — skip ads without it ────────────────────────────
+    if not ad.market_price_low:
+        with _log_lock:
+            log.info("  SKIP no market price: %.55s", ad.title)
+        return None
 
     # ── Better image ──────────────────────────────────────────────────────────
     if not ad.image_url:
