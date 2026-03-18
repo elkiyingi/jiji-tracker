@@ -255,9 +255,19 @@ def build_broker_set(supabase: Client) -> set[str]:
 
 # Keywords that strongly indicate a commercial dealer rather than a private seller
 BROKER_KEYWORDS = {
-    "motors", "auto", "limited", "ltd", "company", "co.", "enterprise",
-    "trading", "dealers", "garage", "imports", "sales", "cars", "vehicles",
-    "automotive", "ug", "uganda", "centre", "center",
+    # Company structure words
+    "limited", "ltd", "company", "co.", "corp", "inc",
+    # Car dealer words
+    "motors", "auto", "automotive", "vehicles", "cars", "car",
+    "dealers", "dealership", "garage", "imports", "exports",
+    "sales", "solutions",
+    # Shop/store words (catches "Seven Starr Gadgets", "Tech Shop" etc.)
+    "gadgets", "shop", "store", "electronics", "phones", "hardware",
+    "enterprise", "enterprises", "trading", "traders",
+    # Geographic business suffixes common in Uganda
+    "ug", "uganda", "kampala",
+    # Service words
+    "centre", "center", "services", "group",
 }
 
 def is_broker(seller_name: str, broker_set: set[str]) -> bool:
@@ -554,16 +564,37 @@ def enrich_ad(ad: Ad, broker_set: set[str]) -> Optional[Ad]:
         ad.is_likely_broker = True
         return None
 
-    # ── Confirmed price ───────────────────────────────────────────────────────
-    price_el = (
-        soup.select_one("span.b-advert-price__converted")
-        or soup.select_one("div.b-advert-price")
-        or soup.select_one("[class*='price']")
-    )
-    if price_el:
-        confirmed = parse_ugx(price_el.get_text(strip=True))
-        if confirmed:
-            ad.price = confirmed
+    # ── Confirmed price from detail page (always overwrites stub price) ─────
+    # Be specific: target the main price element, NOT the market range element.
+    # Jiji's main price is in a dedicated heading/span, not near "Market price:"
+    confirmed = None
+    for sel in [
+        "span.b-advert-price__converted",
+        "h3.b-advert-price",
+        "div.b-advert-price > span",
+        "span[class*='price-value']",
+        "h2[class*='price']",
+    ]:
+        el = soup.select_one(sel)
+        if el:
+            v = parse_ugx(el.get_text(strip=True))
+            if v and v > 100_000:
+                confirmed = v
+                break
+
+    # Fallback: find the first USh value that is NOT part of a market range
+    if not confirmed:
+        for tag in soup.find_all(string=lambda t: t and "USh" in t or "UGX" in t):
+            txt = str(tag)
+            if "market" in txt.lower() or "~" in txt:
+                continue
+            v = parse_ugx(txt)
+            if v and v > 100_000:
+                confirmed = v
+                break
+
+    if confirmed:
+        ad.price = confirmed  # always trust the detail page over the stub
 
     # Hard price filter on confirmed price
     if not _in_price_range(ad.price):

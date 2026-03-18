@@ -207,6 +207,41 @@ const MODELS = [
   "Subaru Forester", "Subaru Impreza",
   "Mazda CX-5",
   "Mercedes C-Class", "Mercedes E-Class", "Mercedes ML",
+  "VW Golf", "VW Tiguan",
+];
+
+// Comprehensive model list for the full filter modal
+const ALL_MODELS = [
+  // Toyota
+  "Toyota Harrier", "Toyota Vanguard", "Toyota RAV4", "Toyota Land Cruiser",
+  "Toyota Prado", "Toyota Hilux", "Toyota Fortuner", "Toyota Rush",
+  "Toyota Wish", "Toyota Noah", "Toyota Alphard", "Toyota Voxy",
+  "Toyota Corolla", "Toyota Premio", "Toyota Allion", "Toyota Fielder",
+  "Toyota Auris", "Toyota ISIS", "Toyota Spacio", "Toyota Ipsum",
+  "Toyota Raum", "Toyota Passo", "Toyota Vitz", "Toyota Probox",
+  "Toyota Succeed", "Toyota Hiace",
+  // Subaru
+  "Subaru Forester", "Subaru Impreza", "Subaru Outback",
+  "Subaru Legacy", "Subaru XV", "Subaru Levorg",
+  // Mazda
+  "Mazda CX-5", "Mazda CX-3", "Mazda Demio", "Mazda Atenza",
+  "Mazda Axela", "Mazda MPV",
+  // Mercedes
+  "Mercedes C-Class", "Mercedes E-Class", "Mercedes ML",
+  "Mercedes GLE", "Mercedes GLC", "Mercedes A-Class",
+  // VW
+  "VW Golf", "VW Tiguan", "VW Polo", "VW Passat", "VW Touareg",
+  // Honda
+  "Honda CRV", "Honda Fit", "Honda Vezel", "Honda Stepwgn",
+  "Honda Freed", "Honda Civic", "Honda Accord",
+  // Nissan
+  "Nissan X-Trail", "Nissan Juke", "Nissan Note",
+  "Nissan Tiida", "Nissan Serena", "Nissan Fuga",
+  // Other
+  "Mitsubishi Outlander", "Mitsubishi Pajero", "Mitsubishi RVR",
+  "Suzuki Swift", "Suzuki Vitara", "Suzuki Escudo",
+  "BMW X5", "BMW X3", "BMW 3 Series", "BMW 5 Series",
+  "Daihatsu Terios", "Daihatsu Move",
 ];
 
 // ── PRICE PRESETS ─────────────────────────────────────────────────────────────
@@ -405,7 +440,49 @@ function renderChips() {
   const chips = MODELS.map(m =>
     `<button class="chip ${activeModel===m?'active':''}" onclick="setModel('${m}')">${m}</button>`
   ).join("");
-  container.innerHTML = allChip + chips;
+  // "More models" icon button at end
+  const moreBtn = `<button onclick="openModal()"
+    title="All models"
+    style="padding:.3rem .7rem;border-radius:999px;font-size:.75rem;font-weight:700;
+           font-family:'DM Mono',monospace;cursor:pointer;transition:all .18s;
+           border:1px dashed var(--border2);color:var(--muted);background:none;
+           white-space:nowrap;display:flex;align-items:center;gap:.3rem;"
+    onmouseover="this.style.borderColor='var(--accent)';this.style.color='var(--accent)';"
+    onmouseout="this.style.borderColor='var(--border2)';this.style.color='var(--muted)';">
+    <span style="font-size:.9rem;">⊕</span> More
+  </button>`;
+  container.innerHTML = allChip + chips + moreBtn;
+}
+
+function openModal() {
+  document.getElementById("model-modal").style.display = "flex";
+  renderModalGrid(ALL_MODELS);
+  setTimeout(() => document.getElementById("modal-search").focus(), 50);
+}
+
+function closeModal() {
+  document.getElementById("model-modal").style.display = "none";
+  document.getElementById("model-modal").classList.add("hidden");
+}
+
+function filterModalModels(q) {
+  const filtered = q
+    ? ALL_MODELS.filter(m => m.toLowerCase().includes(q.toLowerCase()))
+    : ALL_MODELS;
+  renderModalGrid(filtered);
+}
+
+function renderModalGrid(models) {
+  document.getElementById("modal-grid").innerHTML = models.map(m => `
+    <button class="chip ${activeModel===m?'active':''}"
+            onclick="setModel('${m}');closeModal();">
+      ${m}
+    </button>`).join("");
+}
+
+function clearModelFilter() {
+  setModel('');
+  closeModal();
 }
 
 function setModel(m) {
@@ -530,5 +607,25 @@ function saveNote(id, text) {
   }
 })();
 </script>
+
+<!-- COMPREHENSIVE MODEL FILTER MODAL -->
+<div id="model-modal" class="hidden" onclick="if(event.target===this)closeModal();" style="position:fixed;inset:0;z-index:100;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.7);backdrop-filter:blur(4px);">
+  <div style="background:var(--surf);border:1px solid var(--border2);border-radius:20px;width:min(680px,95vw);max-height:80vh;overflow:hidden;display:flex;flex-direction:column;">
+    <div style="padding:1.25rem 1.5rem;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;">
+      <h2 style="font-family:'Cabinet Grotesk',sans-serif;font-weight:800;font-size:1.1rem;color:var(--text);">All Models</h2>
+      <button onclick="closeModal()" style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:1.4rem;line-height:1;padding:.2rem .4rem;">✕</button>
+    </div>
+    <div style="padding:1rem 1.5rem;border-bottom:1px solid var(--border);">
+      <input id="modal-search" type="search" placeholder="Search models…"
+        oninput="filterModalModels(this.value)"
+        style="width:100%;background:var(--bg);border:1px solid var(--border2);color:var(--text);border-radius:10px;padding:.5rem .9rem;font-size:.875rem;outline:none;" />
+    </div>
+    <div id="modal-grid" style="padding:1.25rem 1.5rem;overflow-y:auto;display:flex;flex-wrap:wrap;gap:.5rem;"></div>
+    <div style="padding:1rem 1.5rem;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:.75rem;">
+      <button onclick="closeModal()" style="padding:.45rem 1.1rem;border-radius:8px;border:1px solid var(--border2);background:none;color:var(--muted);font-size:.8rem;font-family:'DM Mono',monospace;cursor:pointer;">Cancel</button>
+      <button onclick="clearModelFilter()" style="padding:.45rem 1.1rem;border-radius:8px;border:1px solid var(--border2);background:none;color:var(--text);font-size:.8rem;font-family:'DM Mono',monospace;cursor:pointer;">Clear</button>
+    </div>
+  </div>
+</div>
 </body>
 </html>
